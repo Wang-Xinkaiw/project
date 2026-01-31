@@ -46,7 +46,21 @@ class EvolutionaryTuningMain:
         self.severe_degradation = False  # 标记上一轮是否性能严重恶化
         self.last_rejected_strategy = None  # 记录上一轮被拒绝的策略信息
         
-        # “混合模式”新增：策略尝试历史记录（用于避免重复）
+        # "智能调用千问API"新增：连续无改进轮次计数器
+        self.consecutive_no_improvement = 0  # 连续无有效改进的轮次
+        self.last_significant_improvement_iter = 0  # 上次显著改进的轮次
+        self.advisor_call_history = []  # 千问API调用历史记录
+        
+        # 加载智能调用配置
+        self.smart_call_config = {
+            'enabled': self.config.get('advisor', {}).get('smart_call_enabled', True),
+            'no_improvement_threshold': self.config.get('advisor', {}).get('no_improvement_threshold', 50),
+            'min_performance_change': self.config.get('advisor', {}).get('min_performance_change', 0.01),
+            'call_history_enabled': self.config.get('advisor', {}).get('call_history_enabled', True),
+            'call_history_file': self.config.get('advisor', {}).get('call_history_file', 'advisor_call_history.json')
+        }
+        
+        # "混合模式"新增：策略尝试历史记录（用于避免重复）
         self.strategy_attempts_history = []  # 记录所有尝试过的策略摘要
 
         # 创建输出目录
@@ -143,19 +157,39 @@ class EvolutionaryTuningMain:
                 self.logger.error(f"策略评估失败: {e}")
                 performance_results = {name: {'error': f'评估失败: {str(e)}', 'iterations': 1000, 'converged': False} for name in problem_names}
 
-            # === 调用千问指导者分析 ===
+            # === 智能调用千问指导者分析 ===
             if self.advisor and self.advisor.enabled:
-                try:
-                    self.last_advisor_guidance = self.advisor.analyze_evaluation_results(
-                        evaluation_results=performance_results,
-                        iteration=self.iteration,
-                        history=self.history
-                    )
-                    self.advisor.save_analysis(self.last_advisor_guidance, self.iteration)
-                    self.logger.info("千问指导者分析完成")
-                except Exception as e:
-                    self.logger.error(f"千问指导者分析失败: {e}")
-                    self.last_advisor_guidance = None
+                should_call_advisor = self._should_call_advisor(avg_performance)
+                
+                if should_call_advisor:
+                    try:
+                        self.logger.info(f"触发千问指导者分析 (连续无改进: {self.consecutive_no_improvement}/{self.smart_call_config['no_improvement_threshold']})")
+                        
+                        call_start_time = datetime.now()
+                        self.last_advisor_guidance = self.advisor.analyze_evaluation_results(
+                            evaluation_results=performance_results,
+                            iteration=self.iteration,
+                            history=self.history
+                        )
+                        call_end_time = datetime.now()
+                        call_duration = (call_end_time - call_start_time).total_seconds()
+                        
+                        self.advisor.save_analysis(self.last_advisor_guidance, self.iteration)
+                        
+                        # 记录调用历史
+                        self._record_advisor_call(
+                            iteration=self.iteration,
+                            reason=f"连续无改进达到阈值({self.consecutive_no_improvement}轮)",
+                            duration=call_duration,
+                            guidance_summary=self.last_advisor_guidance[:200] if self.last_advisor_guidance else ""
+                        )
+                        
+                        self.logger.info("千问指导者分析完成")
+                    except Exception as e:
+                        self.logger.error(f"千问指导者分析失败: {e}")
+                        self.last_advisor_guidance = None
+                else:
+                    self.logger.debug(f"跳过千问指导者分析 (连续无改进: {self.consecutive_no_improvement}/{self.smart_call_config['no_improvement_threshold']})")
 
             # 计算总体性能指标
             avg_performance = self._calculate_average_performance(performance_results)
@@ -177,6 +211,12 @@ class EvolutionaryTuningMain:
             # 更新最佳策略 & 统计连续无改进轮数（用于早停）
             # 性能改进或持平时都收录
             if avg_performance <= self.best_performance:
+                # 计算性能改进比例
+                if self.best_performance < float('inf') and self.best_performance > 0:
+                    improvement_ratio = (self.best_performance - avg_performance) / self.best_performance
+                else:
+                    improvement_ratio = 1.0  # 首次改进，视为100%改进
+                
                 self.best_performance = avg_performance
                 self.best_strategy = {
                     'path': strategy_path,
@@ -185,7 +225,15 @@ class EvolutionaryTuningMain:
                 }
                 self.no_improve_rounds = 0
                 self.last_rejected_strategy = None  # 清除拒绝记录
-                self.logger.info(f"发现新最佳策略，性能: {avg_performance:.2f}")
+                
+                # "智能调用千问API"：检查是否为显著改进
+                if improvement_ratio >= self.smart_call_config['min_performance_change']:
+                    self.consecutive_no_improvement = 0  # 重置连续无改进计数
+                    self.last_significant_improvement_iter = self.iteration
+                    self.logger.info(f"发现新最佳策略，性能: {avg_performance:.2f} (改进 {improvement_ratio*100:.2f}%)")
+                else:
+                    # 性能改进但不够显著，仍然计数
+                    self.logger.info(f"发现新最佳策略，性能: {avg_performance:.2f} (改进 {improvement_ratio*100:.2f}%，未达到显著改进阈值)")
                 
                 # 只有性能改进时才记录到历史
                 self.history.append({
@@ -213,6 +261,9 @@ class EvolutionaryTuningMain:
                     'detailed_results': performance_results
                 }
                 self.logger.warning(f"性能变差 ({self.best_performance:.2f} -> {avg_performance:.2f})，不收录此策略，继续迭代")
+                
+                # "智能调用千问API"：性能变差，增加连续无改进计数
+                self.consecutive_no_improvement += 1
 
             self.logger.info(f"第 {self.iteration} 轮迭代完成，平均性能: {avg_performance:.2f}")
 
@@ -686,6 +737,81 @@ class EvolutionaryTuningMain:
                 count += 1
         return total_iterations / count if count > 0 else float('inf')
 
+    # ============== "智能调用千问API"新增方法 ==============
+    
+    def _should_call_advisor(self, current_performance: float) -> bool:
+        """
+        判断是否应该调用千问指导者
+        
+        Args:
+            current_performance: 当前策略的性能
+            
+        Returns:
+            是否应该调用千问指导者
+        """
+        # 如果未启用智能调用模式，则每次都调用
+        if not self.smart_call_config.get('enabled', True):
+            return True
+        
+        # 如果连续无改进次数达到阈值，触发调用
+        if self.consecutive_no_improvement >= self.smart_call_config['no_improvement_threshold']:
+            self.logger.info(f"连续无改进次数({self.consecutive_no_improvement})达到阈值({self.smart_call_config['no_improvement_threshold']})，触发千问指导者分析")
+            return True
+        
+        # 如果是第一次迭代，不调用（因为没有历史数据）
+        if self.iteration == 1:
+            return False
+        
+        # 其他情况不调用
+        return False
+    
+    def _record_advisor_call(self, iteration: int, reason: str, 
+                            duration: float, guidance_summary: str):
+        """
+        记录千问API调用历史
+        
+        Args:
+            iteration: 迭代轮次
+            reason: 调用原因
+            duration: 调用耗时（秒）
+            guidance_summary: 指导建议摘要
+        """
+        call_record = {
+            'iteration': iteration,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'reason': reason,
+            'duration_seconds': round(duration, 2),
+            'consecutive_no_improvement': self.consecutive_no_improvement,
+            'best_performance': self.best_performance,
+            'guidance_summary': guidance_summary
+        }
+        
+        self.advisor_call_history.append(call_record)
+        
+        # 如果启用了调用历史保存，则保存到文件
+        if self.smart_call_config.get('call_history_enabled', True):
+            self._save_advisor_call_history()
+    
+    def _save_advisor_call_history(self):
+        """保存千问API调用历史到文件"""
+        if not self.smart_call_config.get('call_history_enabled', True):
+            return
+        
+        history_file = self.smart_call_config.get('call_history_file', 'advisor_call_history.json')
+        
+        try:
+            import json
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'call_history': self.advisor_call_history,
+                    'total_calls': len(self.advisor_call_history),
+                    'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }, f, indent=2, ensure_ascii=False)
+            
+            self.logger.info(f"千问API调用历史已保存到: {history_file}")
+        except Exception as e:
+            self.logger.error(f"保存千问API调用历史失败: {e}")
+
     def _output_final_results(self):
         """输出最终结果"""
         self.logger.info("=" * 50)
@@ -705,9 +831,23 @@ class EvolutionaryTuningMain:
                 'best_strategy': self.best_strategy,
                 'history': self.history,
                 'config': self.config,
-                'final_iteration': self.iteration
+                'final_iteration': self.iteration,
+                'advisor_call_history': self.advisor_call_history,
+                'total_advisor_calls': len(self.advisor_call_history),
+                'consecutive_no_improvement': self.consecutive_no_improvement
             }, f, indent=2, default=str, ensure_ascii=False)
         self.logger.info(f"结果已保存到: {results_file}")
+        
+        # 输出千问API调用统计
+        if self.advisor_call_history:
+            self.logger.info("=" * 50)
+            self.logger.info("千问API调用统计")
+            self.logger.info(f"总调用次数: {len(self.advisor_call_history)}")
+            self.logger.info(f"连续无改进轮次: {self.consecutive_no_improvement}")
+            if self.advisor_call_history:
+                total_duration = sum(call['duration_seconds'] for call in self.advisor_call_history)
+                self.logger.info(f"总调用耗时: {total_duration:.2f}秒")
+                self.logger.info(f"平均调用耗时: {total_duration/len(self.advisor_call_history):.2f}秒")
 
 if __name__ == "__main__":
     main = EvolutionaryTuningMain("config.yaml")

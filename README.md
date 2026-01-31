@@ -10,6 +10,7 @@
 - **多算法支持**：可扩展支持ADMM、梯度下降等多种优化算法
 - **真实评估**：在真实或仿真问题上进行策略评估
 - **智能反馈**：基于性能数据的自动化分析与建议生成
+- **千问专家指导**：智能调用千问API，在性能停滞时提供专家级优化建议
 - **可扩展架构**：模块化设计，易于添加新算法和测试问题
 
 ## 📁 文件结构
@@ -85,6 +86,20 @@ algorithms:
     base_class: "GradientDescentAlgorithm"
     problem_module: "problems.gradient_descent_problems"
     default_lr: 0.01
+
+千问指导者配置（智能调用）
+yaml
+advisor:
+  enabled: true  # 是否启用指导者
+  api_key: "your_qwen_api_key"  # 阿里云DashScope API密钥
+  model: "qwen3-235b-a22b"  # 千问模型名称
+  
+  # 智能调用配置
+  smart_call_enabled: true  # 是否启用智能调用模式
+  no_improvement_threshold: 50  # 连续无改进的轮次阈值
+  min_performance_change: 0.01  # 判断为"有效改进"的最小性能变化比例（1%）
+  call_history_enabled: true  # 是否保存调用历史记录
+
 终止条件
 yaml
 termination:
@@ -231,6 +246,29 @@ logs/: 运行日志
 收敛曲线图（如配置）
 
 详细的迭代历史
+
+千问API调用历史（如果启用）
+
+🤖 千问智能指导功能
+
+本框架集成了千问API智能调用功能，当系统连续50次（可配置）未检测到有效更改时，自动触发对千问API的调用，以获取具有指导性的改进意见。
+
+**核心特性**：
+- 智能触发机制：基于连续无改进计数，在合适的时机触发调用
+- 灵活的参数配置：所有关键参数都可通过配置文件调整
+- 完整的调用历史记录：记录每次调用的详细信息，便于后续分析
+- 详细的日志输出：提供清晰的调用过程和状态信息
+
+**配置参数**：
+- `smart_call_enabled`: 是否启用智能调用模式（默认true）
+- `no_improvement_threshold`: 连续无改进的轮次阈值（默认50）
+- `min_performance_change`: 判断为"有效改进"的最小性能变化比例（默认1%）
+- `call_history_enabled`: 是否保存调用历史记录（默认true）
+
+**详细文档**：
+- 功能说明：[ADVISOR_SMART_CALL.md](ADVISOR_SMART_CALL.md)
+- 使用示例：[ADVISOR_USAGE_EXAMPLE.md](ADVISOR_USAGE_EXAMPLE.md)
+- 实现总结：[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
 
 🤝 贡献指南
 Fork项目
