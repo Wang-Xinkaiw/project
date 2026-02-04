@@ -12,7 +12,7 @@ from feedback_loop import FeedbackLoop
 from advisor import ADMMAdvisor
 
 class EvolutionaryTuningMain:
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = "project/config.yaml"):
         """
         初始化主控制器
         Args:
@@ -710,5 +710,5 @@ class EvolutionaryTuningMain:
         self.logger.info(f"结果已保存到: {results_file}")
 
 if __name__ == "__main__":
-    main = EvolutionaryTuningMain("config.yaml")
+    main = EvolutionaryTuningMain("project/config.yaml")
     main.run()
