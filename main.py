@@ -5,14 +5,13 @@ import logging
 import os
 from datetime import datetime
 from typing import Dict, Any, List
-# import importlib.util # 可能需要，取决于evaluator如何加载策略
 from strategy_generator import StrategyGenerator
 from evaluator import StrategyEvaluator
 from feedback_loop import FeedbackLoop
 from advisor import ADMMAdvisor
 
 class EvolutionaryTuningMain:
-    def __init__(self, config_path: str = "project/config.yaml"):
+    def __init__(self, config_path: str = "config.yaml"):
         """
         初始化主控制器
         Args:
@@ -43,10 +42,8 @@ class EvolutionaryTuningMain:
         self.best_performance = float('inf')
         self.history = []
         self.no_improve_rounds = 0  # 连续无性能改进的轮数，用于早停
-        self.severe_degradation = False  # 标记上一轮是否性能严重恶化
-        self.last_rejected_strategy = None  # 记录上一轮被拒绝的策略信息
         
-        # "智能调用千问API"新增：连续无改进轮次计数器
+        # 智能调用千问API配置
         self.consecutive_no_improvement = 0  # 连续无有效改进的轮次
         self.last_significant_improvement_iter = 0  # 上次显著改进的轮次
         self.advisor_call_history = []  # 千问API调用历史记录
@@ -60,7 +57,7 @@ class EvolutionaryTuningMain:
             'call_history_file': self.config.get('advisor', {}).get('call_history_file', 'advisor_call_history.json')
         }
         
-        # "混合模式"新增：策略尝试历史记录（用于避免重复）
+        # 策略尝试历史记录（用于避免重复）
         self.strategy_attempts_history = []  # 记录所有尝试过的策略摘要
 
         # 创建输出目录
@@ -89,23 +86,13 @@ class EvolutionaryTuningMain:
         default_api_key = "your_deepseek_api_key"
         if api_key == default_api_key or not api_key or not api_key.startswith("sk-"):
             self.logger.error(f"API密钥配置有问题: {api_key[:10]}..." if api_key else "API密钥为空")
-            self.logger.error("请确保在config.yaml中配置正确的DeepSeek API密钥")
-            self.logger.error("您可以使用: https://platform.deepseek.com/api_keys 获取API密钥")
-            self.logger.error("当前config.yaml中的api_key需要替换为您的实际API密钥")
             return
-        else:
-            self.logger.info("API密钥配置正确")
-
-        # 检查其他API参数
-        api_config = self.config['api']
-        self.logger.info(f"使用API配置: model={api_config.get('model')}, temperature={api_config.get('temperature')}")
 
         while not self._should_terminate():
             self.iteration += 1
             self.logger.info(f"开始第 {self.iteration} 轮迭代")
 
-            # 获取反馈信息 (注意：这里使用的是上一轮的结果来生成本轮的反馈)
-            # 在第一轮，history 为空，所以会使用初始 prompt
+            # 获取反馈信息
             feedback_for_generation = self._get_feedback_for_generation()
 
             # 生成策略
@@ -115,7 +102,7 @@ class EvolutionaryTuningMain:
             )
             if not strategy_code:
                 self.logger.error("策略生成失败，跳过此轮迭代。")
-                continue # 跳过本次迭代，进入下一轮
+                continue
 
             # 保存策略
             strategy_path = f"strategies/strategy_iter_{self.iteration}.py"
@@ -126,7 +113,6 @@ class EvolutionaryTuningMain:
             # 从配置中获取ADMM问题列表
             if 'problems' in self.config and 'admm' in self.config['problems']:
                 problem_names = self.config['problems']['admm']
-                self.logger.info(f"从配置中加载ADMM问题: {problem_names}")
             else:
                 # 如果没有配置，使用默认的7个问题
                 problem_names = [
@@ -138,7 +124,6 @@ class EvolutionaryTuningMain:
                     "low_rank_representation",
                     "robust_multi_view_spectral_clustering"
                 ]
-                self.logger.warning(f"使用默认ADMM问题列表: {problem_names}")
 
             # 评估策略
             try:
@@ -147,7 +132,7 @@ class EvolutionaryTuningMain:
                     algorithm_type="admm",
                     problem_names=problem_names
                 )
-                # 新增：详细打印每个问题的迭代次数和收敛情况，方便调试
+                # 打印每个问题的迭代次数和收敛情况
                 for problem_name, result in performance_results.items():
                     if isinstance(result, dict):
                         iters = result.get('iterations')
@@ -157,7 +142,13 @@ class EvolutionaryTuningMain:
                 self.logger.error(f"策略评估失败: {e}")
                 performance_results = {name: {'error': f'评估失败: {str(e)}', 'iterations': 1000, 'converged': False} for name in problem_names}
 
-            # === 智能调用千问指导者分析 ===
+            # 计算总体性能指标
+            avg_performance = self._calculate_average_performance(performance_results)
+            
+            # 记录此次尝试到历史
+            self._record_strategy_attempt(strategy_path, strategy_code, avg_performance, performance_results)
+
+            # 智能调用千问指导者分析
             if self.advisor and self.advisor.enabled:
                 should_call_advisor = self._should_call_advisor(avg_performance)
                 
@@ -188,28 +179,8 @@ class EvolutionaryTuningMain:
                     except Exception as e:
                         self.logger.error(f"千问指导者分析失败: {e}")
                         self.last_advisor_guidance = None
-                else:
-                    self.logger.debug(f"跳过千问指导者分析 (连续无改进: {self.consecutive_no_improvement}/{self.smart_call_config['no_improvement_threshold']})")
 
-            # 计算总体性能指标
-            avg_performance = self._calculate_average_performance(performance_results)
-            
-            # 「混合模式」新增：记录此次尝试到历史
-            self._record_strategy_attempt(strategy_path, strategy_code, avg_performance, performance_results)
-
-            # 精英保留机制：检测性能是否严重恶化
-            performance_degradation_ratio = 0.0
-            if self.best_performance < float('inf') and self.best_performance > 0:
-                performance_degradation_ratio = (avg_performance - self.best_performance) / self.best_performance
-            
-            # 如果性能恶化超过50%，标记为严重恶化
-            self.severe_degradation = performance_degradation_ratio > 0.5
-            if self.severe_degradation:
-                self.logger.warning(f"检测到性能严重恶化: {self.best_performance:.2f} -> {avg_performance:.2f} (恶化 {performance_degradation_ratio*100:.1f}%)")
-                self.logger.warning("下一轮将强制基于历史最优策略进行改进")
-
-            # 更新最佳策略 & 统计连续无改进轮数（用于早停）
-            # 性能改进或持平时都收录
+            # 更新最佳策略 & 统计连续无改进轮数
             if avg_performance <= self.best_performance:
                 # 计算性能改进比例
                 if self.best_performance < float('inf') and self.best_performance > 0:
@@ -224,15 +195,13 @@ class EvolutionaryTuningMain:
                     'results': performance_results
                 }
                 self.no_improve_rounds = 0
-                self.last_rejected_strategy = None  # 清除拒绝记录
                 
-                # "智能调用千问API"：检查是否为显著改进
+                # 检查是否为显著改进
                 if improvement_ratio >= self.smart_call_config['min_performance_change']:
                     self.consecutive_no_improvement = 0  # 重置连续无改进计数
                     self.last_significant_improvement_iter = self.iteration
                     self.logger.info(f"发现新最佳策略，性能: {avg_performance:.2f} (改进 {improvement_ratio*100:.2f}%)")
                 else:
-                    # 性能改进但不够显著，仍然计数
                     self.logger.info(f"发现新最佳策略，性能: {avg_performance:.2f} (改进 {improvement_ratio*100:.2f}%，未达到显著改进阈值)")
                 
                 # 只有性能改进时才记录到历史
@@ -243,7 +212,7 @@ class EvolutionaryTuningMain:
                     'detailed_results': performance_results
                 })
                 
-                # 生成反馈 (注意：这里是为下一轮迭代准备的反馈)
+                # 生成反馈
                 feedback = self.feedback_loop.generate_feedback(
                     performance_results=performance_results,
                     history=self.history,
@@ -251,18 +220,10 @@ class EvolutionaryTuningMain:
                 )
                 self.feedback_loop.save_feedback(feedback, self.iteration)
             else:
-                # 性能变差，不收录这个策略，记录拒绝信息供下一轮参考
-                self.last_rejected_strategy = {
-                    'iteration': self.iteration,
-                    'strategy_path': strategy_path,
-                    'performance': avg_performance,
-                    'best_performance': self.best_performance,
-                    'degradation_ratio': (avg_performance - self.best_performance) / self.best_performance if self.best_performance > 0 else 0,
-                    'detailed_results': performance_results
-                }
+                # 性能变差，不收录这个策略
                 self.logger.warning(f"性能变差 ({self.best_performance:.2f} -> {avg_performance:.2f})，不收录此策略，继续迭代")
                 
-                # "智能调用千问API"：性能变差，增加连续无改进计数
+                # 性能变差，增加连续无改进计数
                 self.consecutive_no_improvement += 1
 
             self.logger.info(f"第 {self.iteration} 轮迭代完成，平均性能: {avg_performance:.2f}")
@@ -274,57 +235,16 @@ class EvolutionaryTuningMain:
         """
         获取用于策略生成的反馈信息
         """
-        # 这个方法是在新的一轮迭代开始前被调用的。
-        # 所以 self.iteration 是当前轮次（比如1, 2, 3...）
-        # self.history 包含了截至上一轮的所有历史信息。
-        
         if self.iteration == 1:
-            # 在第一轮迭代开始前，history 仍然是空的 []。
-            # 所以我们提供初始提示。
+            # 第一轮，提供初始提示
             initial_prompt = self.feedback_loop.get_initial_prompt("admm")
-            strict_requirements = "\n\n【strict模式要求】\n1. 请生成一个继承自 `BaseTuningStrategy` 的Python类。\n2. 实现 `update_parameters` 方法，签名必须为 `update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]`。\n3. 该方法只能调整 `beta` 参数，返回 `{'beta': new_beta_value}`。\n4. 保持其他ADMM参数不变。\n"
+            strict_requirements = "\n\n【strict模式要求】\n1. 继承BaseTuningStrategy类\n2. update_parameters签名: update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]\n3. 只调整beta参数，返回{'beta': new_beta_value}\n"
             return initial_prompt + strict_requirements
         else:
-            # 在第二轮及以后迭代开始前，history 至少包含一轮的结果。
-            # 我们获取上一轮的结果来指导本轮的生成。
-            # 因为 self.iteration 已经自增了，所以 history[-1] 就是上一轮的结果
+            # 第二轮及以后，获取上一轮的结果来指导本轮的生成
             if not self.history:
-                 # 防御性检查，理论上不会执行到这里，因为 iteration > 1 时 history 不应为空
-                 self.logger.warning("History is unexpectedly empty when iteration > 1.")
-                 return self.feedback_loop.get_initial_prompt("admm")
-            
-            # 检查是否有被拒绝的策略，生成警告提示
-            rejected_warning = ""
-            if self.last_rejected_strategy:
-                rej = self.last_rejected_strategy
-                rej_perf = rej.get('performance', 0)
-                best_perf = rej.get('best_performance', 0)
-                degradation = rej.get('degradation_ratio', 0) * 100
-                rej_path = rej.get('strategy_path', '')
-                
-                rejected_warning = (
-                    "\n\n【警告：上一轮策略已被拒绝】\n"
-                    f"上一轮生成的策略性能下降，已被丢弃不予收录。\n"
-                    f"• 当前最佳性能: {best_perf:.2f} 次迭代\n"
-                    f"• 被拒绝策略性能: {rej_perf:.2f} 次迭代 (恶化 {degradation:.1f}%)\n"
-                    f"• 拒绝原因: 性能不如当前最佳策略\n\n"
-                    "【改进建议】\n"
-                    "1. 请避免与上一轮被拒绝策略类似的优化方向\n"
-                    "2. 必须基于当前最佳策略进行小幅改进\n"
-                    "3. 尝试不同的调参方向，而不是继续之前失败的思路\n"
-                )
-                
-                # 如果被拒绝的策略文件存在，显示其代码供参考（作为反面案例）
-                if rej_path and os.path.exists(rej_path):
-                    try:
-                        with open(rej_path, 'r', encoding='utf-8') as f:
-                            rej_code = f.read()
-                        rejected_warning += (
-                            "【被拒绝的策略代码（反面案例，避免类似设计）】\n"
-                            "```python\n" + rej_code + "\n```\n"
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"读取被拒绝策略代码失败: {e}")
+                self.logger.warning("History is unexpectedly empty when iteration > 1.")
+                return self.feedback_loop.get_initial_prompt("admm")
             
             current_result = self.history[-1]['detailed_results'] # 上一轮的详细结果
             previous_result = self.history[-2]['detailed_results'] if len(self.history) > 1 else None # 上上轮的结果
@@ -338,82 +258,54 @@ class EvolutionaryTuningMain:
             # 追加策略代码，帮助模型做有针对性的改进
             strategy_sections = []
 
-            # 精英保留机制：如果上一轮性能严重恶化，强制基于最优策略改进
-            use_best_as_base = getattr(self, 'severe_degradation', False)
+            # 正常情况：提供上一轮策略和最优策略
             
-            if use_best_as_base and self.best_strategy:
-                # 性能严重恶化，强制基于最优策略
-                best_strategy_path = self.best_strategy.get('path')
-                if best_strategy_path and os.path.exists(best_strategy_path):
-                    try:
-                        with open(best_strategy_path, 'r', encoding='utf-8') as f:
-                            best_code = f.read()
-                        best_perf = self.best_strategy.get('performance')
-                        perf_str = f"{best_perf:.2f}" if isinstance(best_perf, (int, float)) else str(best_perf)
-                        
-                        strategy_sections.append(
-                            "\n\n【警告：性能严重恶化，强制回退到最优策略】\n"
-                            f"上一轮策略性能严重恶化，必须基于历史最优策略（平均迭代 {perf_str} 次）进行小幅改进。\n"
-                            "绝对禁止大幅重构或使用上一轮的失败策略。\n\n"
-                            "【必须基于以下最优策略进行改进】\n"
-                            "```python\n" + best_code + "\n```\n\n"
-                            "【改进约束】\n"
-                            "1. 保留上述最优策略的90%以上的代码\n"
-                            "2. 只允许修改 1-2 个超参数的值\n"
-                            "3. 不允许改变核心算法逻辑\n"
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"读取最优策略代码失败: {e}")
-            else:
-                # 正常情况：提供上一轮策略和最优策略
-                
-                # 上一轮使用的策略
-                last_strategy_path = self.history[-1].get('strategy_path')
-                if last_strategy_path and os.path.exists(last_strategy_path):
-                    try:
-                        with open(last_strategy_path, 'r', encoding='utf-8') as f:
-                            last_code = f.read()
-                        last_perf = self.history[-1].get('performance')
-                        last_perf_str = f"{last_perf:.2f}" if isinstance(last_perf, (int, float)) else str(last_perf)
-                        strategy_sections.append(
-                            f"\n\n【上一轮调参策略代码】(平均迭代 {last_perf_str} 次)\n"
-                            "下面是上一轮使用的策略实现，请在理解其 beta 调整逻辑的基础上进行小幅改进：\n"
-                            "```python\n" + last_code + "\n```"
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"读取上一轮策略代码失败: {e}")
+            # 上一轮使用的策略
+            last_strategy_path = self.history[-1].get('strategy_path')
+            if last_strategy_path and os.path.exists(last_strategy_path):
+                try:
+                    with open(last_strategy_path, 'r', encoding='utf-8') as f:
+                        last_code = f.read()
+                    last_perf = self.history[-1].get('performance')
+                    last_perf_str = f"{last_perf:.2f}" if isinstance(last_perf, (int, float)) else str(last_perf)
+                    strategy_sections.append(
+                        f"\n\n【上一轮策略】(平均迭代 {last_perf_str} 次)\n" +
+                        "基于此策略进行改进：\n" +
+                        "```python\n" + last_code + "\n```"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"读取上一轮策略代码失败: {e}")
 
-                # 历史最优策略
-                best_strategy_path = self.best_strategy.get('path') if self.best_strategy else None
-                if best_strategy_path and os.path.exists(best_strategy_path) and best_strategy_path != last_strategy_path:
-                    try:
-                        with open(best_strategy_path, 'r', encoding='utf-8') as f:
-                            best_code = f.read()
-                        best_perf = self.best_strategy.get('performance')
-                        perf_str = f"{best_perf:.2f}" if isinstance(best_perf, (int, float)) else str(best_perf)
-                        strategy_sections.append(
-                            f"\n\n【历史最优调参策略（必须参考）】(平均迭代 {perf_str} 次)\n"
-                            "这是目前性能最好的策略。请重点对比上一轮策略与该最优策略的差异，\n"
-                            "并在最优策略的基础上设计改进方案：\n"
-                            "```python\n" + best_code + "\n```"
-                        )
-                    except Exception as e:
-                        self.logger.warning(f"读取历史最优策略代码失败: {e}")
+            # 历史最优策略
+            best_strategy_path = self.best_strategy.get('path') if self.best_strategy else None
+            if best_strategy_path and os.path.exists(best_strategy_path) and best_strategy_path != last_strategy_path:
+                try:
+                    with open(best_strategy_path, 'r', encoding='utf-8') as f:
+                        best_code = f.read()
+                    best_perf = self.best_strategy.get('performance')
+                    perf_str = f"{best_perf:.2f}" if isinstance(best_perf, (int, float)) else str(best_perf)
+                    strategy_sections.append(
+                        f"\n\n【历史最优策略】(平均迭代 {perf_str} 次)\n" +
+                        "在最优策略基础上改进：\n" +
+                        "```python\n" + best_code + "\n```"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"读取历史最优策略代码失败: {e}")
 
-            # 「混合模式」新增：添加历史策略摘要
+            # 生成历史策略尝试摘要
             history_summary = self._generate_history_summary()
 
             # 融合千问指导者建议
             advisor_section = ""
-            if hasattr(self, 'last_advisor_guidance') and self.last_advisor_guidance:
+            if self.last_advisor_guidance:
                 advisor_section = (
-                    "\n\n【千问专家指导建议】\n"
-                    "以下是ADMM优化专家(Qwen3-235B-A22B)给出的深度分析和优化建议，请优先参考：\n\n"
-                    f"{self.last_advisor_guidance}\n\n"
+                    "\n\n【千问专家指导建议】\n" +
+                    "以下是ADMM优化专家(Qwen3-235B-A22B)给出的深度分析和优化建议，请优先参考：\n\n" +
+                    f"{self.last_advisor_guidance}\n\n" +
                     "【请优先按照上述专家建议调整策略参数】\n"
                 )
 
-            return rejected_warning + performance_feedback + unconverged_analysis + advisor_section + history_summary + "".join(strategy_sections)
+            return performance_feedback + unconverged_analysis + advisor_section + history_summary + "".join(strategy_sections)
 
 
     def _should_terminate(self) -> bool:
@@ -425,20 +317,18 @@ class EvolutionaryTuningMain:
             self.logger.info(f"达到最大迭代次数: {termination_config['max_iterations']}")
             return True
 
-        # 检查性能阈值 (如果平均迭代次数低于某个值，认为达标)
-        if len(self.history) >= 1: # 可以根据需要调整轮次
-            recent_perf = [h['performance'] for h in self.history[-1:]] # 检查最近一轮
+        # 检查性能阈值
+        if len(self.history) >= 1:
+            recent_perf = [h['performance'] for h in self.history[-1:]]
             avg_recent = sum(recent_perf) / len(recent_perf)
-            # 假设如果平均迭代次数少于500次就算达标 (可根据需要调整)
             performance_target = self.config.get('termination', {}).get('performance_target', 500)
-            self.logger.info(f"当前平均性能: {avg_recent:.1f}, 目标: {performance_target}")
             if avg_recent <= performance_target:
                 self.logger.info(f"达到性能目标: 最近平均{avg_recent:.1f}次迭代 <= {performance_target}")
                 return True
 
         # 检查改进停滞（基于 patience 的早停机制）
         patience = termination_config['patience']
-        if getattr(self, 'no_improve_rounds', 0) >= patience:
+        if self.no_improve_rounds >= patience:
             self.logger.info(f"连续 {patience} 轮无性能改进，触发早停")
             return True
         return False
@@ -533,6 +423,15 @@ class EvolutionaryTuningMain:
         # 生成针对性优化建议
         analysis += "【针对性优化建议】\n"
         
+        # 检查l1_regression和elastic_net_regression是否未收敛
+        regression_problems = [p for p in unconverged_problems if p['name'] in ['l1_regression', 'elastic_net_regression']]
+        
+        if regression_problems:
+            analysis += f"0. 问题 {', '.join([p['name'] for p in regression_problems])} 包含噪声项E:\n"
+            analysis += "   - 可参考惩罚参数单调上升策略(beta只增不减)\n"
+            analysis += "   - 初始beta=1.0，每次迭代按1.5-2.5倍增大，上限1e4\n"
+            analysis += "   - 此策略基于工具箱原作者经验，有助于解决收敛困难\n\n"
+        
         if both_high:
             analysis += f"1. 问题 {', '.join(both_high)} 的原始残差和对偶残差都较大:\n"
             analysis += "   - 建议采用更保守的 beta 调整策略，避免剧烈波动\n"
@@ -545,7 +444,7 @@ class EvolutionaryTuningMain:
             analysis += "   - 可以试着调整 tau_inc 参数使 beta 更快增长\n\n"
         
         if high_dual_res:
-            analysis += f"3. 问题 {', '.join(high_dual_res)} 的对偶残差较大（吶朗日乃次优化）:\n"
+            analysis += f"3. 问题 {', '.join(high_dual_res)} 的对偶残差较大:\n"
             analysis += "   - 对偶残差大表示制的变化还未稳定\n"
             analysis += "   - 建议减小 beta 值以缓解过度惩罚\n"
             analysis += "   - 可以试着调整 tau_dec 参数使 beta 更快衰减\n\n"
@@ -806,49 +705,55 @@ class EvolutionaryTuningMain:
                     'call_history': self.advisor_call_history,
                     'total_calls': len(self.advisor_call_history),
                     'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }, f, indent=2, ensure_ascii=False)
-            
-            self.logger.info(f"千问API调用历史已保存到: {history_file}")
+                }, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            self.logger.error(f"保存千问API调用历史失败: {e}")
+            self.logger.warning(f"保存千问API调用历史失败: {e}")
 
     def _output_final_results(self):
         """输出最终结果"""
-        self.logger.info("=" * 50)
-        self.logger.info("进化调参完成")
-        self.logger.info(f"总迭代轮次: {self.iteration}")
-        if self.best_strategy:
-            self.logger.info(f"最佳策略路径: {self.best_strategy['path']}")
-            self.logger.info(f"最佳性能 (平均迭代次数): {self.best_strategy['performance']:.2f}")
-        else:
-            self.logger.info("未找到满足条件的最佳策略。")
-
-        # 保存结果到文件
-        results_file = f"results/final_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        import json
-        with open(results_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'best_strategy': self.best_strategy,
-                'history': self.history,
-                'config': self.config,
-                'final_iteration': self.iteration,
-                'advisor_call_history': self.advisor_call_history,
-                'total_advisor_calls': len(self.advisor_call_history),
-                'consecutive_no_improvement': self.consecutive_no_improvement
-            }, f, indent=2, default=str, ensure_ascii=False)
-        self.logger.info(f"结果已保存到: {results_file}")
+        self.logger.info("\n" + "=" * 60)
+        self.logger.info("进化自适应调参框架运行完成")
+        self.logger.info("=" * 60)
         
-        # 输出千问API调用统计
-        if self.advisor_call_history:
-            self.logger.info("=" * 50)
-            self.logger.info("千问API调用统计")
-            self.logger.info(f"总调用次数: {len(self.advisor_call_history)}")
-            self.logger.info(f"连续无改进轮次: {self.consecutive_no_improvement}")
-            if self.advisor_call_history:
-                total_duration = sum(call['duration_seconds'] for call in self.advisor_call_history)
-                self.logger.info(f"总调用耗时: {total_duration:.2f}秒")
-                self.logger.info(f"平均调用耗时: {total_duration/len(self.advisor_call_history):.2f}秒")
+        if self.best_strategy:
+            best_path = self.best_strategy['path']
+            best_perf = self.best_strategy['performance']
+            self.logger.info(f"最优策略路径: {best_path}")
+            self.logger.info(f"最优性能: {best_perf:.2f} 次迭代")
+            
+            # 打印最优策略的详细结果
+            self.logger.info("\n最优策略详细结果:")
+            for problem_name, result in self.best_strategy['results'].items():
+                if isinstance(result, dict):
+                    if 'error' in result:
+                        self.logger.info(f"  {problem_name}: ❌ 错误 - {result['error'][:100]}...")
+                    else:
+                        iters = result.get('iterations', 0)
+                        converged = result.get('converged', False)
+                        status = "✓" if converged else "✗"
+                        obj = result.get('final_objective', 'N/A')
+                        obj_str = f"{obj:.2e}" if isinstance(obj, (int, float)) else str(obj)
+                        self.logger.info(f"  {problem_name}: {status} {iters}次迭代 (Objective: {obj_str})")
+        else:
+            self.logger.warning("未找到最佳策略")
+        
+        # 统计信息
+        self.logger.info("\n统计信息:")
+        self.logger.info(f"总迭代轮数: {self.iteration}")
+        self.logger.info(f"历史记录条数: {len(self.history)}")
+        if self.advisor and self.advisor.enabled:
+            self.logger.info(f"千问API调用次数: {len(self.advisor_call_history)}")
+        
+        self.logger.info("\n框架运行完成，祝您科研顺利！")
+
 
 if __name__ == "__main__":
-    main = EvolutionaryTuningMain("project/config.yaml")
-    main.run()
+    try:
+        main = EvolutionaryTuningMain()
+        main.run()
+    except KeyboardInterrupt:
+        print("\n用户中断，程序退出")
+    except Exception as e:
+        print(f"程序运行失败: {e}")
+        import traceback
+        traceback.print_exc()

@@ -47,6 +47,13 @@ feedback/
 advisor_reports/
 advisor_call_history.json
 
+# Generated strategies 
+strategies/
+!strategies/base_strategy.py
+!strategies/baseline_strategy.py
+!strategies/initial_strategy.py
+!strategies/standard_admm_strategy.py
+
 # API Keys and sensitive data
 config.yaml
 !config.yaml.example

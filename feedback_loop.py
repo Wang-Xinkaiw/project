@@ -1,5 +1,4 @@
 """反馈循环模块负责将评估结果组织成反馈信息"""
-import json
 import logging
 from typing import Dict, Any, List
 from datetime import datetime
@@ -116,14 +115,19 @@ class FeedbackLoop:
         # 此方法现在主要用于 main.py 获取初始提示语句，但核心逻辑已移到 system_prompt
         # 保留此方法以防 main.py 需要
         if algorithm_type == 'admm':
-            return """
-【任务】生成一个ADMM参数自适应调整策略。
+            return """【任务】生成ADMM惩罚参数beta自适应调整策略。
+
 【要求】
-1. 继承 `BaseTuningStrategy` 基类。
-2. 实现 `update_parameters`, `get_parameters`, `set_parameters` 方法。
-3. `update_parameters` 方法签名必须为 `update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]`。
-4. 该方法必须返回一个包含 'beta' 键的字典，用于更新惩罚参数。
-5. 策略应旨在优化ADMM的收敛速度和稳定性，仅调整 beta。
+1. 继承BaseTuningStrategy基类
+2. 实现update_parameters, get_parameters, set_parameters方法
+3. update_parameters签名: update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]
+4. 返回{'beta': new_beta_value}
+
+【针对l1_regression和elastic_net_regression的参考策略】
+这两个问题包含噪声项E，可参考惩罚参数单调上升策略：
+- beta只增不减，初始beta=1.0，每次迭代按1.5-2.5倍增大，上限1e4
+- 此策略基于工具箱原作者经验，有助于解决收敛困难
+- 可根据实际情况灵活调整，不强制要求
 """
         return ""
 

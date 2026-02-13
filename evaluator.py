@@ -72,7 +72,6 @@ class StrategyEvaluator:
                 self.logger.error(f"策略类 {strategy_class.__name__} 验证失败")
                 return None
                 
-            self.logger.info(f"成功加载策略: {strategy_class.__name__}")
             return strategy_instance
             
         except Exception as e:
@@ -94,8 +93,6 @@ class StrategyEvaluator:
             # 获取方法签名
             sig = inspect.signature(update_method)
             params = list(sig.parameters.keys())
-            
-            self.logger.info(f"update_parameters方法签名: {params}")
             
             # 检查参数数量（绑定方法的签名中不包含self，所以至少应该有1个参数iteration_state）
             if len(params) < 1:
@@ -214,13 +211,10 @@ class StrategyEvaluator:
                 if problem_name.endswith('_problem'):
                     base_name = problem_name[:-8]
                 
-                self.logger.info(f"尝试加载ADMM问题: {problem_name} (基础名称: {base_name})")
-                
                 if hasattr(problem_module, 'get_admm_problem'):
                     try:
                         problem_instance = problem_module.get_admm_problem(base_name, seed=42)
                         if problem_instance:
-                            self.logger.info(f"通过get_admm_problem成功加载: {base_name}")
                             return problem_instance
                     except Exception as e:
                         self.logger.warning(f"get_admm_problem失败: {e}")
@@ -230,7 +224,6 @@ class StrategyEvaluator:
                     if hasattr(problem_module, func_name):
                         problem_func = getattr(problem_module, func_name)
                         problem_instance = problem_func()
-                        self.logger.info(f"通过函数调用加载问题: {func_name}")
                         return problem_instance
                 
                 self.logger.error(f"无法找到问题 {problem_name}")
@@ -494,8 +487,6 @@ class StrategyEvaluator:
             
         # 对每个问题进行评估
         for problem_name in problem_names:
-            self.logger.info(f"在问题 {problem_name} 上评估策略")
-            
             try:
                 # 加载问题
                 problem = self._load_problem(algorithm_type, problem_name)

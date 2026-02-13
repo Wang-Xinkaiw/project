@@ -134,7 +134,6 @@ class BaseOptimizationProblem(ABC):
         if 'converged' in iteration_result and iteration_result['converged']:
             self.converged = True
             self.final_objective = iteration_result.get('objective', self.compute_objective())
-            self.logger.info(f"子类报告收敛: objective={self.final_objective:.6f}")
             return True
         
         # 否则使用残差检查
@@ -215,8 +214,6 @@ class ADMMProblemBase(BaseOptimizationProblem):
         self.iterations = 0
         self.final_objective = float('inf')
         self.convergence_history = []
-        
-        self.logger.info(f"ADMM问题 '{self.name}' 重置完成")
     
     @abstractmethod
     def _generate_data(self):
@@ -363,8 +360,6 @@ class GradientDescentProblemBase(BaseOptimizationProblem):
         self.iterations = 0
         self.final_objective = float('inf')
         self.convergence_history = []
-        
-        self.logger.info(f"梯度下降问题 '{self.name}' 重置完成")
     
     @abstractmethod
     def _generate_data(self):
@@ -504,8 +499,6 @@ class GenericOptimizationProblem(BaseOptimizationProblem):
         self.iterations = 0
         self.final_objective = float('inf')
         self.convergence_history = []
-        
-        self.logger.info(f"通用优化问题 '{self.name}' 重置完成")
     
     @abstractmethod
     def _generate_data(self):

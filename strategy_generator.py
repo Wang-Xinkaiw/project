@@ -26,38 +26,20 @@ class StrategyGenerator:
         """
         构建固定的系统提示，定义任务和约束
         """
-        return """你是一个专业的Python程序员，专门编写ADMM算法的参数自适应调优策略。
+        return """你编写ADMM惩罚参数beta的自适应调整策略。
 
-【核心原则 - 渐进式改进】
-你的任务是对已有策略进行**小幅、渐进式的改进**，而不是重新设计整个算法。
-- 每次只修改1-2个超参数的值，或者调整一小段逻辑
-- 保留已有策略中表现良好的部分
-- 避免大幅度重构或完全重写
+【强制要求】
+1. 类继承BaseTuningStrategy
+2. update_parameters签名: def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
+3. iteration_state包含: iteration, primal_residual, dual_residual, beta, objective, converged
+4. 返回{'beta': new_beta_value}
+5. 禁止使用residuals, variables, params, beta等作为参数名，必须从iteration_state获取
 
-【强制要求 - 必须严格遵守】
-
-1. 类必须继承 BaseTuningStrategy
-2. update_parameters方法签名必须完全匹配：
-   def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
-   
-3. 【禁止】使用以下参数名作为update_parameters的参数：
-   - residuals, residual, res
-   - variables, vars, x
-   - params, parameters, p
-   - beta, rho, penalty
-   - iteration, iter, k
-   
-   所有这些信息都必须从 iteration_state 字典中获取！
-
-4. iteration_state字典包含的键：
-   - 'iteration': 当前迭代次数
-   - 'primal_residual': 原始残差
-   - 'dual_residual': 对偶残差  
-   - 'beta': 当前beta值
-   - 'objective': 目标函数值
-   - 'converged': 是否收敛
-
-5. 返回值必须是包含'beta'键的字典：{'beta': new_beta_value}
+【收敛策略参考】
+l1_regression和elastic_net_regression问题包含噪声项E，可参考惩罚参数单调上升策略：
+- beta只增不减，初始beta=1.0，每次迭代按1.1-1.5倍增大，上限1e4
+- 此策略基于工具箱原作者经验，有助于解决收敛困难
+- 可根据实际情况灵活调整，不强制要求
 
 【正确示例】
 ```python
@@ -207,22 +189,22 @@ def update_parameters(self, primal_residual, dual_residual, beta):  # 错误！
             return None
 
         # 构建用户消息，结合反馈
-        user_message_content = f"""
-当前任务：基于已有策略进行渐进式改进，优化ADMM算法的自适应惩罚参数(beta)调整策略。
+        user_message_content = f"""基于已有策略改进beta调整策略。
 
 {feedback}
 
-【改进要求】
-1. 必须基于上面提供的策略代码进行修改，不要从头重写
-2. 每次只做一个小的改动，例如：
-   - 调整某个超参数的值（如 mu, tau_inc, tau_dec 等）
-   - 修改残差比较的阈值
-   - 调整 beta 的范围限制
-   - 添加平滑系数或改进更新公式
-3. 保留历史最优策略中有效的核心逻辑
-4. 避免大幅重构或完全不同的设计
+【针对l1_regression和elastic_net_regression的参考策略】
+这两个问题包含噪声项E，可参考惩罚参数单调上升策略：
+- beta只增不减，每次迭代按1.1-1.5倍增大，上限1e4
+- 可根据实际情况灵活调整
 
-请输出改进后的完整Python代码，代码必须用```python和```包裹。
+【改进方向】
+1. 微调超参数（mu, tau_inc, tau_dec等）
+2. 调整beta范围
+3. 改进残差比较逻辑
+4. 保留最优策略核心逻辑
+
+输出完整Python代码，用```python包裹。
 """
 
         try:
@@ -277,8 +259,3 @@ def update_parameters(self, primal_residual, dual_residual, beta):  # 错误！
             traceback.print_exc()
             return None
 
-# --- 示例用法 ---
-# config = {...} # 从 config.yaml 加载
-# generator = StrategyGenerator(config)
-# new_strategy_code = generator.generate_strategy(algorithm_type="admm", feedback="上次策略收敛太慢...")
-# print(new_strategy_code)

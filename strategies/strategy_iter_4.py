@@ -1,450 +1,361 @@
 from strategies.base_strategy import BaseTuningStrategy
+from typing import Dict, Any
 import numpy as np
 
-import numpy as np
-from typing import Dict, Any, Optional
-
-
-class BaseTuningStrategy:
-    """基础调优策略基类"""
-
-    def __init__(self, initial_parameters: Optional[Dict[str, Any]] = None):
-        """初始化策略
-
-        Args:
-            initial_parameters: 初始参数字典
-        """
-        self.parameters = initial_parameters or {}
-
-    def update_parameters(self, feedback: Dict[str, Any]) -> Dict[str, Any]:
-        """根据反馈更新参数
-
-        Args:
-            feedback: 包含性能反馈信息的字典
-
-        Returns:
-            更新后的参数字典
-        """
-        raise NotImplementedError("子类必须实现此方法")
-
-    def get_parameters(self) -> Dict[str, Any]:
-        """获取当前参数
-
-        Returns:
-            当前参数字典
-        """
-        return self.parameters.copy()
-
-    def set_parameters(self, parameters: Dict[str, Any]) -> None:
-        """设置参数
-
-        Args:
-            parameters: 要设置的参数字典
-        """
-        self.parameters = parameters.copy()
-
-
-class AdaptiveADMMStrategy(BaseTuningStrategy):
-    """自适应ADMM参数调优策略
-
-    该策略根据算法性能反馈自适应调整ADMM参数，特别针对NoneType错误进行优化，
-    通过参数验证、边界检查和自适应调整提高算法的稳定性和泛化能力。
-
-    关键特性：
-    1. 参数验证和错误处理，防止None值传递
-    2. 自适应ρ调整策略，平衡原始和对偶残差
-    3. 问题类型感知，针对不同优化问题调整参数
-    4. 收敛性监控和自适应调整
+class OptimizedAdaptiveBetaStrategy(BaseTuningStrategy):
     """
-
-    def __init__(self, initial_parameters: Optional[Dict[str, Any]] = None):
-        """初始化ADMM调优策略
-
-        Args:
-            initial_parameters: 初始参数字典，包含ADMM算法参数
+    针对未收敛问题优化的ADMM惩罚参数beta自适应调整策略
+    
+    主要改进方向：
+    1. 对回归问题采用更明确的识别和特殊处理策略
+    2. 调整增长因子范围，避免beta过快达到上限
+    3. 增加收敛检测机制，对接近收敛的问题减小beta增长
+    4. 针对对偶残差大的问题添加特殊处理逻辑
+    """
+    
+    def __init__(self):
+        # 基础参数
+        self.initial_beta = 1.0
+        self.max_beta = 1e4
+        self.min_beta = 1e-6
+        
+        # 增长参数 - 调整为更温和的增长
+        self.base_growth_factor = 1.3  # 减小基础增长因子
+        self.max_growth_factor = 2.0   # 减小最大增长因子
+        self.min_growth_factor = 1.05  # 增加最小增长因子，避免beta下降过快
+        
+        # 收敛检测参数
+        self.convergence_threshold = 1e-3
+        self.residual_ratio_threshold = 3.0  # 进一步降低残差比阈值
+        
+        # 回归问题参数（针对l1_regression和elastic_net_regression）
+        self.regression_initial_beta = 1.0
+        self.regression_growth_factor = 1.5  # 回归问题使用固定增长因子
+        
+        # 历史记录
+        self.primal_history = []
+        self.dual_history = []
+        self.history_window = 10  # 增加窗口大小
+        
+        # 状态跟踪
+        self.stagnation_counter = 0
+        self.stagnation_threshold = 15  # 减少停滞检测阈值
+        
+        # 早期阶段
+        self.initial_phase_iterations = 30  # 减少初始阶段迭代次数
+        
+        # 特殊问题处理
+        self.dual_residual_large_counter = 0
+        self.dual_residual_threshold = 50.0  # 对偶残差大的阈值
+        
+    def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
         """
-        # 默认参数配置，确保所有参数都有有效默认值
-        default_params = {
-            'rho': 1.0,                 # ADMM惩罚参数
-            'rho_adjustment': True,     # 是否启用自适应ρ调整
-            'rho_min': 1e-6,           # ρ最小值
-            'rho_max': 1e6,            # ρ最大值
-            'tau_incr': 2.0,           # ρ增加倍数
-            'tau_decr': 2.0,           # ρ减少倍数
-            'mu': 10.0,                # 残差平衡参数
-            'max_iter': 1000,          # 最大迭代次数
-            'abs_tol': 1e-4,           # 绝对容忍度
-            'rel_tol': 1e-2,           # 相对容忍度
-            'alpha': 1.0,              # 松弛参数
-            'adaptive_tol': True,      # 是否自适应调整容忍度
-            'problem_type': 'general', # 问题类型标识
-            'verbose': False           # 详细输出
-        }
-
-        # 合并用户提供的参数和默认参数
-        if initial_parameters:
-            # 验证并过滤无效参数
-            valid_params = {}
-            for key, value in initial_parameters.items():
-                if value is not None and key in default_params:
-                    valid_params[key] = value
-                elif value is not None:
-                    # 对于不在默认参数中的键，也允许但记录警告
-                    valid_params[key] = value
-
-            # 确保所有必需参数都有值
-            for key in default_params:
-                if key not in valid_params:
-                    valid_params[key] = default_params[key]
-        else:
-            valid_params = default_params.copy()
-
-        super().__init__(valid_params)
-
-        # 历史性能记录，用于自适应调整
-        self.performance_history = {
-            'iterations': [],
-            'primal_residuals': [],
-            'dual_residuals': [],
-            'convergence_rates': []
-        }
-
-        # 问题类型映射，针对不同类型调整参数
-        self.problem_configs = {
-            'l1_regularization': {
-                'rho': 1.0,
-                'alpha': 1.5,
-                'adaptive_tol': True
-            },
-            'elastic_net': {
-                'rho': 1.0,
-                'alpha': 1.2,
-                'adaptive_tol': True
-            },
-            'l1_regression': {
-                'rho': 1.0,
-                'alpha': 1.0,
-                'adaptive_tol': False
-            },
-            'elastic_net_regression': {
-                'rho': 1.0,
-                'alpha': 1.0,
-                'adaptive_tol': False
-            },
-            'low_rank_matrix_completion': {
-                'rho': 0.1,
-                'alpha': 1.8,
-                'adaptive_tol': True
-            },
-            'low_rank_representation': {
-                'rho': 0.1,
-                'alpha': 1.8,
-                'adaptive_tol': True
-            },
-            'robust_multi_view_spectral_clustering': {
-                'rho': 0.5,
-                'alpha': 1.5,
-                'adaptive_tol': True
-            },
-            'general': {
-                'rho': 1.0,
-                'alpha': 1.0,
-                'adaptive_tol': True
-            }
-        }
-
-    def _validate_parameters(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """验证和清理参数，防止None值
-
+        更新ADMM参数，主要调整惩罚参数beta
+        
         Args:
-            params: 待验证的参数字典
-
+            iteration_state: 包含迭代信息的字典，包括：
+                - iteration: 当前迭代次数
+                - primal_residual: 原始残差
+                - dual_residual: 对偶残差
+                - beta: 当前beta值
+                - objective: 目标函数值
+                - converged: 是否收敛
+                
         Returns:
-            验证后的参数字典
+            Dict[str, Any]: 包含更新后的参数，只返回{'beta': new_beta_value}
         """
-        validated = {}
-
-        for key, value in params.items():
-            # 检查是否为None
-            if value is None:
-                # 使用当前参数值或默认值
-                validated[key] = self.parameters.get(key, 0.0)
-                if self.parameters.get('verbose', False):
-                    print(f"警告: 参数 {key} 为None，已替换为 {validated[key]}")
+        # 从iteration_state获取所有需要的信息
+        current_beta = iteration_state.get('beta', self.initial_beta)
+        primal_res = iteration_state.get('primal_residual', 1.0)
+        dual_res = iteration_state.get('dual_residual', 1.0)
+        iteration = iteration_state.get('iteration', 0)
+        converged = iteration_state.get('converged', False)
+        
+        # 保存历史记录用于趋势分析
+        if primal_res is not None and dual_res is not None:
+            self.primal_history.append(primal_res)
+            self.dual_history.append(dual_res)
+            if len(self.primal_history) > self.history_window:
+                self.primal_history.pop(0)
+                self.dual_history.pop(0)
+        
+        # 如果已经收敛或达到最大beta，直接返回当前beta
+        if converged:
+            return {'beta': current_beta}
+        
+        if current_beta >= self.max_beta:
+            # 达到最大beta后，如果残差仍然很大，尝试小幅调整
+            if primal_res > self.convergence_threshold or dual_res > self.convergence_threshold:
+                # 如果原始残差远小于对偶残差，小幅减少beta
+                if dual_res > 1e-10 and primal_res / dual_res < 0.01:
+                    return {'beta': current_beta * 0.95}
+                # 否则保持最大beta
+                else:
+                    return {'beta': self.max_beta}
             else:
-                validated[key] = value
-
-        # 确保关键参数有有效值
-        required_params = ['rho', 'max_iter', 'abs_tol', 'rel_tol', 'alpha']
-        for param in required_params:
-            if param not in validated:
-                validated[param] = self.parameters.get(param, 1.0 if param == 'rho' else
-                                                      1000 if param == 'max_iter' else
-                                                      1e-4 if param == 'abs_tol' else
-                                                      1e-2 if param == 'rel_tol' else 1.0)
-
-        # 参数边界检查
-        validated['rho'] = np.clip(validated['rho'],
-                                  self.parameters.get('rho_min', 1e-6),
-                                  self.parameters.get('rho_max', 1e6))
-        validated['alpha'] = np.clip(validated['alpha'], 0.5, 2.0)
-        validated['max_iter'] = max(10, min(10000, validated['max_iter']))
-
-        return validated
-
-    def _adjust_for_problem_type(self, problem_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """根据问题类型调整参数
-
-        Args:
-            problem_type: 问题类型标识
-            params: 当前参数
-
-        Returns:
-            调整后的参数
-        """
-        if problem_type in self.problem_configs:
-            config = self.problem_configs[problem_type]
-            adjusted = params.copy()
-
-            # 合并问题特定配置
-            for key in ['rho', 'alpha', 'adaptive_tol']:
-                if key in config:
-                    adjusted[key] = config[key]
-
-            # 设置问题类型标识
-            adjusted['problem_type'] = problem_type
-
-            return adjusted
+                return {'beta': current_beta}
+        
+        # 判断是否为回归问题（基于残差模式）
+        is_regression = self._is_regression_problem(primal_res, dual_res)
+        
+        # 早期阶段：温和增加beta
+        if iteration < self.initial_phase_iterations:
+            if is_regression:
+                # 回归问题早期更快增长
+                growth_factor = min(1.8, self.regression_growth_factor * 1.2)
+            else:
+                growth_factor = min(1.5, self.base_growth_factor * 1.2)
+            
+            new_beta = current_beta * growth_factor
+            new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+            return {'beta': float(new_beta)}
+        
+        # 处理对偶残差特别大的情况
+        if dual_res > self.dual_residual_threshold:
+            self.dual_residual_large_counter += 1
+            # 如果连续多次对偶残差都很大，减小beta
+            if self.dual_residual_large_counter >= 3:
+                # 减小beta，但设置下限
+                new_beta = current_beta * 0.8
+                self.dual_residual_large_counter = 0  # 重置计数器
+                new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+                return {'beta': float(new_beta)}
         else:
-            # 未知问题类型，使用通用配置
-            params['problem_type'] = 'general'
-            return params
-
-    def _adaptive_rho_adjustment(self, primal_residual: float, dual_residual: float,
-                                current_rho: float) -> float:
-        """自适应调整ρ参数，平衡原始和对偶残差
-
-        Args:
-            primal_residual: 原始残差
-            dual_residual: 对偶残差
-            current_rho: 当前ρ值
-
-        Returns:
-            调整后的ρ值
-        """
-        if not self.parameters.get('rho_adjustment', True):
-            return current_rho
-
-        # 避免除以零
-        if primal_residual == 0 or dual_residual == 0:
-            return current_rho
-
-        mu = self.parameters.get('mu', 10.0)
-        tau_incr = self.parameters.get('tau_incr', 2.0)
-        tau_decr = self.parameters.get('tau_decr', 2.0)
-        rho_min = self.parameters.get('rho_min', 1e-6)
-        rho_max = self.parameters.get('rho_max', 1e6)
-
-        # 计算残差比例
-        ratio = primal_residual / dual_residual
-
-        # 根据比例调整ρ
-        if ratio > mu:
-            # 原始残差远大于对偶残差，增加ρ
-            new_rho = current_rho * tau_incr
-        elif ratio < 1.0 / mu:
-            # 对偶残差远大于原始残差，减少ρ
-            new_rho = current_rho / tau_decr
+            self.dual_residual_large_counter = max(0, self.dual_residual_large_counter - 1)
+        
+        # 根据不同问题类型采用不同策略
+        if is_regression:
+            # 回归问题：beta只增不减，使用固定增长因子
+            growth_factor = self.regression_growth_factor
+            new_beta = current_beta * growth_factor
         else:
-            # 残差平衡，保持ρ不变
-            new_rho = current_rho
-
-        # 边界检查
-        return np.clip(new_rho, rho_min, rho_max)
-
-    def _adaptive_tolerance_adjustment(self, convergence_rate: float,
-                                      current_tol: Dict[str, float]) -> Dict[str, float]:
-        """根据收敛速度自适应调整容忍度
-
-        Args:
-            convergence_rate: 收敛速度估计
-            current_tol: 当前容忍度设置
-
-        Returns:
-            调整后的容忍度
+            # 其他问题：自适应调整策略
+            growth_factor = self._calculate_adaptive_growth_factor(primal_res, dual_res)
+            
+            # 计算新beta值，允许小幅减少
+            if growth_factor < 1.0:
+                # 如果beta要减少，最多减少到当前值的90%
+                new_beta = current_beta * max(growth_factor, 0.9)
+            else:
+                new_beta = current_beta * growth_factor
+        
+        # 检测停滞情况
+        if self._is_stagnating(primal_res, dual_res):
+            self.stagnation_counter += 1
+            if self.stagnation_counter > self.stagnation_threshold:
+                # 如果停滞太久，更温和地调整beta
+                if is_regression:
+                    # 回归问题稍微加快增长
+                    new_beta = current_beta * min(self.regression_growth_factor * 1.3, 2.0)
+                else:
+                    # 其他问题尝试小幅振荡
+                    if np.random.random() < 0.5:
+                        new_beta = current_beta * 1.2
+                    else:
+                        new_beta = current_beta * 0.9
+                self.stagnation_counter = 0
+        else:
+            self.stagnation_counter = max(0, self.stagnation_counter - 1)
+        
+        # 检测接近收敛的情况
+        if self._is_near_convergence(primal_res, dual_res):
+            # 接近收敛时，减小beta变化幅度
+            if new_beta > current_beta:
+                new_beta = current_beta * min(1.1, growth_factor)
+            elif new_beta < current_beta:
+                new_beta = current_beta * max(0.95, growth_factor)
+        
+        # 限制beta在有效范围内
+        new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+        
+        return {'beta': float(new_beta)}
+    
+    def _calculate_adaptive_growth_factor(self, primal_res: float, dual_res: float) -> float:
         """
-        if not self.parameters.get('adaptive_tol', True):
-            return current_tol
-
-        adjusted = current_tol.copy()
-
-        # 根据收敛速度调整
-        if convergence_rate > 0.9:
-            # 收敛缓慢，放松容忍度
-            adjusted['abs_tol'] *= 1.5
-            adjusted['rel_tol'] *= 1.5
-        elif convergence_rate < 0.5:
-            # 收敛快速，收紧容忍度以获得更精确解
-            adjusted['abs_tol'] *= 0.8
-            adjusted['rel_tol'] *= 0.8
-
-        # 边界检查
-        adjusted['abs_tol'] = np.clip(adjusted['abs_tol'], 1e-10, 1e-2)
-        adjusted['rel_tol'] = np.clip(adjusted['rel_tol'], 1e-10, 1.0)
-
-        return adjusted
-
-    def update_parameters(self, feedback: Dict[str, Any]) -> Dict[str, Any]:
-        """根据性能反馈更新ADMM参数
-
-        该方法分析算法性能反馈，自适应调整参数以提高收敛性和稳定性，
-        特别处理NoneType错误和不同问题类型的需求。
-
+        计算自适应增长因子
+        
         Args:
-            feedback: 包含以下键的字典:
-                - 'average_iterations': 平均迭代次数
-                - 'performance_change': 性能变化百分比
-                - 'detailed_problems': 详细问题表现字典
-                - 'primal_residuals': 原始残差列表（可选）
-                - 'dual_residuals': 对偶残差列表（可选）
-                - 'problem_type': 问题类型标识（可选）
-
+            primal_res: 原始残差
+            dual_res: 对偶残差
+            
         Returns:
-            更新后的参数字典
+            float: 增长因子
         """
-        # 验证反馈数据
-        if not isinstance(feedback, dict):
-            raise ValueError("反馈必须是字典类型")
-
-        # 获取当前参数并验证
-        current_params = self.get_parameters()
-        current_params = self._validate_parameters(current_params)
-
-        # 检查是否有错误信息
-        error_problems = []
-        detailed_problems = feedback.get('detailed_problems', {})
-
-        if detailed_problems:
-            for problem_name, problem_info in detailed_problems.items():
-                if '错误' in str(problem_info) or 'error' in str(problem_info).lower():
-                    error_problems.append(problem_name)
-
-        # 处理NoneType错误 - 这是反馈中的主要问题
-        if error_problems:
-            if current_params.get('verbose', False):
-                print(f"检测到错误问题: {error_problems}")
-
-            # 针对每个错误问题进行参数调整
-            for problem in error_problems:
-                # 提取问题类型（从问题名称）
-                problem_type = problem.lower().replace(' ', '_')
-
-                # 应用问题特定配置
-                current_params = self._adjust_for_problem_type(problem_type, current_params)
-
-                # 针对NoneType错误，重置关键参数
-                current_params['rho'] = 1.0  # 重置为默认值
-                current_params['alpha'] = 1.0  # 重置为默认值
-
-                # 增加最大迭代次数
-                current_params['max_iter'] = min(2000, current_params['max_iter'] * 1.5)
-
-                # 收紧容忍度
-                current_params['abs_tol'] = max(1e-6, current_params['abs_tol'] * 0.5)
-                current_params['rel_tol'] = max(1e-4, current_params['rel_tol'] * 0.5)
-
-        # 处理性能反馈
-        avg_iterations = feedback.get('average_iterations')
-        performance_change = feedback.get('performance_change', 0.0)
-
-        if avg_iterations is not None:
-            # 记录性能历史
-            self.performance_history['iterations'].append(avg_iterations)
-
-            # 如果历史记录足够，计算收敛趋势
-            if len(self.performance_history['iterations']) >= 3:
-                recent_iters = self.performance_history['iterations'][-3:]
-                convergence_rate = recent_iters[-1] / max(recent_iters[0], 1)
-                self.performance_history['convergence_rates'].append(convergence_rate)
-
-                # 根据收敛趋势调整参数
-                if convergence_rate > 1.1:
-                    # 发散趋势，调整参数
-                    current_params['rho'] *= 1.2
-                    current_params['alpha'] *= 0.9
-                elif convergence_rate < 0.9:
-                    # 良好收敛趋势
-                    # 保持参数或微调
-                    pass
-
-            # 基于平均迭代次数调整最大迭代次数
-            if avg_iterations >= current_params['max_iter'] * 0.9:
-                # 接近最大迭代次数，增加上限
-                current_params['max_iter'] = min(5000, int(current_params['max_iter'] * 1.2))
-            elif avg_iterations <= current_params['max_iter'] * 0.3:
-                # 使用较少迭代，可减少上限
-                current_params['max_iter'] = max(100, int(current_params['max_iter'] * 0.9))
-
-        # 处理残差信息（如果提供）
-        primal_residuals = feedback.get('primal_residuals', [])
-        dual_residuals = feedback.get('dual_residuals', [])
-
-        if primal_residuals and dual_residuals:
-            # 计算平均残差
-            avg_primal = np.mean(primal_residuals) if primal_residuals else 1.0
-            avg_dual = np.mean(dual_residuals) if dual_residuals else 1.0
-
-            # 自适应调整ρ
-            current_params['rho'] = self._adaptive_rho_adjustment(
-                avg_primal, avg_dual, current_params['rho']
-            )
-
-            # 自适应调整容忍度
-            tol_dict = {
-                'abs_tol': current_params.get('abs_tol', 1e-4),
-                'rel_tol': current_params.get('rel_tol', 1e-2)
-            }
-
-            # 估计收敛速度
-            if len(primal_residuals) > 1:
-                convergence_rate = primal_residuals[-1] / max(primal_residuals[0], 1e-10)
-                adjusted_tol = self._adaptive_tolerance_adjustment(convergence_rate, tol_dict)
-                current_params.update(adjusted_tol)
-
-        # 应用问题类型特定调整（如果有指定）
-        problem_type = feedback.get('problem_type')
-        if problem_type:
-            current_params = self._adjust_for_problem_type(problem_type, current_params)
-
-        # 最终验证和边界检查
-        current_params = self._validate_parameters(current_params)
-
-        # 更新参数
-        self.set_parameters(current_params)
-
-        return current_params
-
+        # 基础增长因子
+        growth_factor = self.base_growth_factor
+        
+        if primal_res is None or dual_res is None:
+            return growth_factor
+        
+        # 计算残差和
+        total_residual = primal_res + dual_res
+        
+        # 根据残差绝对大小调整
+        if total_residual > 10.0:
+            growth_factor = min(self.max_growth_factor, growth_factor * 1.5)
+        elif total_residual > 1.0:
+            growth_factor = min(self.max_growth_factor, growth_factor * 1.2)
+        elif total_residual < 0.01:
+            # 残差很小时，保持beta稳定
+            growth_factor = 1.0
+        
+        # 根据残差相对大小调整
+        if dual_res > 1e-10:
+            residual_ratio = primal_res / dual_res
+            
+            # 如果原始残差远大于对偶残差，增加beta
+            if residual_ratio > self.residual_ratio_threshold:
+                growth_factor = min(self.max_growth_factor, growth_factor * 1.3)
+            
+            # 如果对偶残差远大于原始残差，减少beta
+            elif residual_ratio < 1.0 / self.residual_ratio_threshold:
+                growth_factor = max(self.min_growth_factor, growth_factor * 0.7)
+        
+        # 考虑历史趋势
+        if len(self.primal_history) >= 3:
+            # 计算最近残差变化趋势
+            if self.primal_history[-2] > 1e-10 and self.dual_history[-2] > 1e-10:
+                primal_change = self.primal_history[-1] / self.primal_history[-2]
+                dual_change = self.dual_history[-1] / self.dual_history[-2]
+                
+                # 如果残差在下降，减缓调整
+                if primal_change < 0.9 and dual_change < 0.9:
+                    growth_factor = max(self.min_growth_factor, growth_factor * 0.9)
+                # 如果残差在增加，加快调整
+                elif primal_change > 1.1 and dual_change > 1.1:
+                    growth_factor = min(self.max_growth_factor, growth_factor * 1.1)
+        
+        # 确保增长因子在合理范围内
+        growth_factor = np.clip(growth_factor, self.min_growth_factor, self.max_growth_factor)
+        
+        return growth_factor
+    
+    def _is_regression_problem(self, primal_res: float, dual_res: float) -> bool:
+        """
+        判断是否为回归问题（包含噪声项E）
+        
+        Args:
+            primal_res: 原始残差
+            dual_res: 对偶残差
+            
+        Returns:
+            bool: 是否为回归问题
+        """
+        if primal_res is None or dual_res is None:
+            return False
+        
+        # 回归问题的典型特征：
+        # 1. 原始残差和对偶残差都较大
+        # 2. 两者数量级相近
+        # 3. 原始残差通常小于对偶残差
+        
+        if primal_res > 0.1 and dual_res > 10.0:
+            ratio = primal_res / dual_res
+            # 回归问题通常原始残差比对偶残差小1-2个数量级
+            if 1e-4 < ratio < 0.1:
+                return True
+        
+        return False
+    
+    def _is_stagnating(self, primal_res: float, dual_res: float) -> bool:
+        """
+        检测算法是否停滞
+        
+        Args:
+            primal_res: 原始残差
+            dual_res: 对偶残差
+            
+        Returns:
+            bool: 是否停滞
+        """
+        if len(self.primal_history) < 5:
+            return False
+        
+        # 计算最近几次迭代的残差变化
+        recent_primal = self.primal_history[-5:]
+        recent_dual = self.dual_history[-5:]
+        
+        # 如果残差几乎没有变化，视为停滞
+        primal_mean = np.mean(recent_primal)
+        dual_mean = np.mean(recent_dual)
+        
+        if primal_mean > 1e-10 and dual_mean > 1e-10:
+            primal_var = np.std(recent_primal) / primal_mean
+            dual_var = np.std(recent_dual) / dual_mean
+            
+            return primal_var < 0.1 and dual_var < 0.1
+        
+        return False
+    
+    def _is_near_convergence(self, primal_res: float, dual_res: float) -> bool:
+        """
+        检测是否接近收敛
+        
+        Args:
+            primal_res: 原始残差
+            dual_res: 对偶残差
+            
+        Returns:
+            bool: 是否接近收敛
+        """
+        if primal_res is None or dual_res is None:
+            return False
+        
+        # 接近收敛的条件：残差已经很小
+        if primal_res < 0.01 and dual_res < 0.1:
+            return True
+        
+        # 或者残差在稳定下降
+        if len(self.primal_history) >= 3:
+            recent_primal = self.primal_history[-3:]
+            recent_dual = self.dual_history[-3:]
+            
+            if all(recent_primal[i] > recent_primal[i+1] for i in range(len(recent_primal)-1)) and \
+               all(recent_dual[i] > recent_dual[i+1] for i in range(len(recent_dual)-1)):
+                return True
+        
+        return False
+    
     def get_parameters(self) -> Dict[str, Any]:
-        """获取当前参数，确保没有None值
-
+        """
+        获取策略参数
+        
         Returns:
-            清理后的参数字典
+            Dict[str, Any]: 参数字典
         """
-        return self._validate_parameters(self.parameters.copy())
-
-    def set_parameters(self, parameters: Dict[str, Any]) -> None:
-        """设置参数，进行验证和清理
-
+        return {
+            'initial_beta': self.initial_beta,
+            'max_beta': self.max_beta,
+            'min_beta': self.min_beta,
+            'base_growth_factor': self.base_growth_factor,
+            'max_growth_factor': self.max_growth_factor,
+            'min_growth_factor': self.min_growth_factor,
+            'convergence_threshold': self.convergence_threshold,
+            'residual_ratio_threshold': self.residual_ratio_threshold,
+            'regression_initial_beta': self.regression_initial_beta,
+            'regression_growth_factor': self.regression_growth_factor,
+            'history_window': self.history_window,
+            'initial_phase_iterations': self.initial_phase_iterations,
+            'stagnation_threshold': self.stagnation_threshold,
+            'dual_residual_threshold': self.dual_residual_threshold
+        }
+    
+    def set_parameters(self, params: Dict[str, Any]) -> None:
+        """
+        设置策略参数
+        
         Args:
-            parameters: 要设置的参数字典
+            params: 参数字典
         """
-        validated = self._validate_parameters(parameters)
-        self.parameters = validated.copy()
-
-        # 确保关键参数存在
-        for key in ['rho', 'max_iter', 'abs_tol', 'rel_tol', 'alpha']:
-            if key not in self.parameters:
-                self.parameters[key] = 1.0 if key == 'rho' else \
-                                     1000 if key == 'max_iter' else \
-                                     1e-4 if key == 'abs_tol' else \
-                                     1e-2 if key == 'rel_tol' else 1.0
+        valid_params = {
+            'initial_beta', 'max_beta', 'min_beta', 
+            'base_growth_factor', 'max_growth_factor', 'min_growth_factor',
+            'convergence_threshold', 'residual_ratio_threshold', 
+            'regression_initial_beta', 'regression_growth_factor',
+            'history_window', 'initial_phase_iterations', 'stagnation_threshold',
+            'dual_residual_threshold'
+        }
+        
+        for key, value in params.items():
+            if key in valid_params and hasattr(self, key):
+                setattr(self, key, value)
