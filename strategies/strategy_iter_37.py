@@ -4,48 +4,38 @@ import numpy as np
 
 class ImprovedADMMStrategy(BaseTuningStrategy):
     def __init__(self):
-        self.min_beta = 1e-4  # 增大下界以避免过小值
+        self.min_beta = 0.01  # 增大最小beta值，避免过小
         self.max_beta = 1e6
-        self.mu = 12.0  # 保留上一轮的保守阈值
-        self.tau_inc = 1.8  # 保留增量因子
-        self.tau_dec = 2.2  # 保留减量因子
-        self.min_iter = 20  # 保留最小迭代次数
-        self.smoothing_factor = 0.2  # 略微增大平滑因子以允许更稳定调整
+        self.mu = 8.0  # 降低mu值，使调整阈值更宽松
+        self.tau_inc = 1.7
+        self.tau_dec = 1.9
+        self.min_beta_threshold = 0.1
         
     def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
-        # 从iteration_state获取所有需要的信息
         primal_res = iteration_state.get('primal_residual', 1.0)
         dual_res = iteration_state.get('dual_residual', 1.0)
         current_beta = iteration_state.get('beta', 1.0)
-        iteration = iteration_state.get('iteration', 0)
         
-        # 防止除零错误并更保守地调整
         if primal_res is None or dual_res is None or dual_res < 1e-15:
             return {'beta': current_beta}
             
-        # 在早期迭代中使用平滑调整
-        if iteration < self.min_iter:
-            # 使用平滑因子避免大幅调整
-            adjusted_ratio = max(primal_res / dual_res, 0.5)  # 限制最小比值
-        else:
-            # 正常调整但更保守
-            adjusted_ratio = primal_res / dual_res
-            
-        # 使用平滑因子避免大幅调整
         if dual_res > 1e-10:
-            if adjusted_ratio > self.mu:
-                # 更保守地增加beta
+            ratio = primal_res / dual_res
+            
+            # 使用更宽松的阈值比较
+            if ratio > self.mu * 0.8:  # 降低阈值倍数，使策略更积极
                 new_beta = current_beta * self.tau_inc
-            elif adjusted_ratio < 1.0 / self.mu:
-                # 更保守地减少beta
-                new_beta = current_beta / self.tau_dec
+            elif ratio < 1.0 / (self.mu * 0.8):  # 对应调整阈值也更宽松
+                # 保守调整：避免beta过快下降
+                if current_beta > self.min_beta_threshold:
+                    new_beta = current_beta / self.tau_dec
+                else:
+                    new_beta = current_beta
             else:
-                # 稍微更保守的平滑调整
-                new_beta = current_beta * (1.0 + self.smoothing_factor/10)
+                new_beta = current_beta
         else:
             new_beta = current_beta
             
-        # 限制beta范围，避免过大或过小
         new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
         return {'beta': float(new_beta)}
     
@@ -56,8 +46,7 @@ class ImprovedADMMStrategy(BaseTuningStrategy):
             'mu': self.mu,
             'tau_inc': self.tau_inc,
             'tau_dec': self.tau_dec,
-            'min_iter': self.min_iter,
-            'smoothing_factor': self.smoothing_factor
+            'min_beta_threshold': self.min_beta_threshold
         }
     
     def set_parameters(self, params: Dict[str, Any]) -> None:
@@ -71,7 +60,5 @@ class ImprovedADMMStrategy(BaseTuningStrategy):
             self.tau_inc = params['tau_inc']
         if 'tau_dec' in params:
             self.tau_dec = params['tau_dec']
-        if 'min_iter' in params:
-            self.min_iter = params['min_iter']
-        if 'smoothing_factor' in params:
-            self.smoothing_factor = params['smoothing_factor']
+        if 'min_beta_threshold' in params:
+            self.min_beta_threshold = params['min_beta_threshold']

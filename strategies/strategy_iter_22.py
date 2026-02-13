@@ -4,41 +4,28 @@ import numpy as np
 
 class ImprovedADMMStrategy(BaseTuningStrategy):
     def __init__(self):
-        self.min_beta = 1e-6
+        self.min_beta = 1e-2  # 增加最小beta值，提高稳定性
         self.max_beta = 1e6
-        self.mu = 12.0  # 增大mu阈值，使调整更保守
-        self.tau_inc = 1.8  # 减小增量因子，更保守地增加beta
-        self.tau_dec = 2.2  # 增大减量因子，更保守地减少beta
-        self.min_iter = 20  # 增加最小迭代次数，用于稳定调整
-        self.smoothing_factor = 0.15  # 减小平滑因子，允许更快速调整
+        self.mu = 10.0  # 增加阈值，减少调整频率
+        self.tau_inc = 1.8  # 保持增量因子不变
+        self.tau_dec = 2.0  # 保持减量因子不变
         
     def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
-        # 从iteration_state获取所有需要的信息
         primal_res = iteration_state.get('primal_residual', 1.0)
         dual_res = iteration_state.get('dual_residual', 1.0)
         current_beta = iteration_state.get('beta', 1.0)
-        iteration = iteration_state.get('iteration', 0)
         
-        # 计算新beta
-        if primal_res is None or dual_res is None:
+        if primal_res is None or dual_res is None or dual_res < 1e-15:
             return {'beta': current_beta}
             
-        # 在早期迭代中使用平滑调整
-        if iteration < self.min_iter:
-            # 使用平滑因子避免大幅调整
-            adjusted_ratio = max(primal_res / dual_res, 0.5)  # 限制最小比值
-        else:
-            # 正常调整
-            adjusted_ratio = primal_res / dual_res
-            
-        # 使用平滑因子避免大幅调整
         if dual_res > 1e-10:
-            if adjusted_ratio > self.mu:
+            ratio = primal_res / dual_res
+            if ratio > self.mu:
                 new_beta = current_beta * self.tau_inc
-            elif adjusted_ratio < 1.0 / self.mu:
+            elif ratio < 1.0 / self.mu:
                 new_beta = current_beta / self.tau_dec
             else:
-                new_beta = current_beta * (1.0 + self.smoothing_factor/5)
+                new_beta = current_beta
         else:
             new_beta = current_beta
             
@@ -51,9 +38,7 @@ class ImprovedADMMStrategy(BaseTuningStrategy):
             'max_beta': self.max_beta,
             'mu': self.mu,
             'tau_inc': self.tau_inc,
-            'tau_dec': self.tau_dec,
-            'min_iter': self.min_iter,
-            'smoothing_factor': self.smoothing_factor
+            'tau_dec': self.tau_dec
         }
     
     def set_parameters(self, params: Dict[str, Any]) -> None:
@@ -67,7 +52,3 @@ class ImprovedADMMStrategy(BaseTuningStrategy):
             self.tau_inc = params['tau_inc']
         if 'tau_dec' in params:
             self.tau_dec = params['tau_dec']
-        if 'min_iter' in params:
-            self.min_iter = params['min_iter']
-        if 'smoothing_factor' in params:
-            self.smoothing_factor = params['smoothing_factor']

@@ -7,8 +7,8 @@ class ImprovedADMMStrategy(BaseTuningStrategy):
         self.min_beta = 1e-4  # 增大下界以避免过小值
         self.max_beta = 1e6
         self.mu = 12.0  # 保留上一轮的保守阈值
-        self.tau_inc = 1.8  # 保留增量因子
-        self.tau_dec = 2.2  # 保留减量因子
+        self.tau_inc = 1.5  # 降低增量因子，使调整更平滑
+        self.tau_dec = 2.0  # 降低减量因子，使调整更平滑
         self.min_iter = 20  # 保留最小迭代次数
         self.smoothing_factor = 0.2  # 略微增大平滑因子以允许更稳定调整
         

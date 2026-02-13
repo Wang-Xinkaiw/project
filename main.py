@@ -12,7 +12,7 @@ from feedback_loop import FeedbackLoop
 from advisor import ADMMAdvisor
 
 class EvolutionaryTuningMain:
-    def __init__(self, config_path: str = "project/config.yaml"):
+    def __init__(self, config_path: str = "config.yaml"):
         """
         初始化主控制器
         Args:
@@ -84,21 +84,17 @@ class EvolutionaryTuningMain:
         """运行主循环"""
         self.logger.info("启动进化自适应调参框架（strict模式）")
 
-        # 检查API配置
-        api_key = self.config['api']['api_key']
-        default_api_key = "your_deepseek_api_key"
-        if api_key == default_api_key or not api_key or not api_key.startswith("sk-"):
-            self.logger.error(f"API密钥配置有问题: {api_key[:10]}..." if api_key else "API密钥为空")
-            self.logger.error("请确保在config.yaml中配置正确的DeepSeek API密钥")
-            self.logger.error("您可以使用: https://platform.deepseek.com/api_keys 获取API密钥")
-            self.logger.error("当前config.yaml中的api_key需要替换为您的实际API密钥")
-            return
-        else:
-            self.logger.info("API密钥配置正确")
-
-        # 检查其他API参数
+        # 检查AnythingLLM API配置
         api_config = self.config['api']
-        self.logger.info(f"使用API配置: model={api_config.get('model')}, temperature={api_config.get('temperature')}")
+        api_key = api_config.get('api_key', 'MB19GQD-BFG4BW1-KGC1KCX-EWSJ5B3')
+        workspace_slug = api_config.get('workspace_slug', 'admm')
+        
+        if not api_key or api_key == 'your_anythingllm_api_key_here':
+            self.logger.error("AnythingLLM API密钥未配置，请在config.yaml中配置正确的API密钥")
+            return
+        
+        self.logger.info("AnythingLLM API配置验证通过")
+        self.logger.info(f"使用API配置: base_url={api_config.get('base_url')}, workspace_slug={workspace_slug}, temperature={api_config.get('temperature')}")
 
         while not self._should_terminate():
             self.iteration += 1
@@ -850,5 +846,5 @@ class EvolutionaryTuningMain:
                 self.logger.info(f"平均调用耗时: {total_duration/len(self.advisor_call_history):.2f}秒")
 
 if __name__ == "__main__":
-    main = EvolutionaryTuningMain("project/config.yaml")
+    main = EvolutionaryTuningMain("config.yaml")
     main.run()

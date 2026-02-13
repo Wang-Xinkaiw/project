@@ -1,5 +1,5 @@
 # strategy_generator.py
-import openai
+import requests
 import logging
 import re
 from typing import Dict, Any, Optional
@@ -14,11 +14,8 @@ class StrategyGenerator:
             config: 从 config.yaml 加载的配置
         """
         api_config = config['api']
-        self.client = openai.OpenAI(
-            api_key=api_config['api_key'],
-            base_url=api_config.get('base_url', 'https://api.deepseek.com')
-        )
-        self.model = api_config.get('model', 'deepseek-coder')
+        self.base_url = api_config.get('base_url', 'http://localhost:11434')
+        self.model = api_config.get('model', 'deepseekcoder')
         self.temperature = api_config.get('temperature', 0.7)
         self.system_prompt = self._build_system_prompt()
 
@@ -27,6 +24,9 @@ class StrategyGenerator:
         构建固定的系统提示，定义任务和约束
         """
         return """你是一个专业的Python程序员，专门编写ADMM算法的参数自适应调优策略。
+
+【RAG功能使用】
+请利用内置的RAG功能，检索相关的ADMM算法文档和参数调优策略文档，结合文档内容生成最优的调优策略。如果检索到相关文档，请在生成的策略中参考这些文档的内容。
 
 【核心原则 - 渐进式改进】
 你的任务是对已有策略进行**小幅、渐进式的改进**，而不是重新设计整个算法。
@@ -226,53 +226,77 @@ def update_parameters(self, primal_residual, dual_residual, beta):  # 错误！
 """
 
         try:
-            logger.info(f"正在调用DeepSeek API生成策略 (Algorithm: {algorithm_type})...")
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_message_content}
-                ],
-                temperature=self.temperature,
-                # max_tokens=2048, # 可选，限制回复长度
+            logger.info(f"正在调用AnythingLLM API生成策略 (Algorithm: {algorithm_type})...")
+            
+            # 构建完整提示词
+            full_prompt = f"{self.system_prompt}\n\n{user_message_content}"
+            
+            # 获取API密钥和工作区
+            import yaml
+            with open('config.yaml', 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            api_key = config.get('api', {}).get('api_key', '')
+            workspace_slug = config.get('api', {}).get('workspace_slug', 'ollama')
+            
+            # 构建API端点
+            url = f"{self.base_url}/api/v1/workspace/{workspace_slug}/chat"
+            
+            # 构建请求参数
+            payload = {
+                "message": full_prompt,
+                "mode": "chat"
+            }
+            
+            # 设置请求头
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            # 发送请求
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=200
             )
 
-            generated_text = response.choices[0].message.content
-            logger.debug(f"API原始响应:\n{generated_text}")
+            if response.status_code == 200:
+                result = response.json()
+                generated_text = result.get('textResponse', '')
+                logger.debug(f"API原始响应:\n{generated_text}")
 
-            # 尝试从响应中提取Python代码块
-            # 优先匹配 ```python ... ```
-            code_match = re.search(r'```python\n(.*?)\n```', generated_text, re.DOTALL)
-            if not code_match:
-                # 如果没找到，尝试匹配 ``` ... ```
-                code_match = re.search(r'```\n(.*?)\n```', generated_text, re.DOTALL)
-            if code_match:
-                extracted_code = code_match.group(1).strip()
-                # 验证并修正代码
-                extracted_code = self._validate_and_fix_code(extracted_code)
-                logger.info("成功从API响应中提取并验证Python代码块。")
-                return extracted_code
+                # 尝试从响应中提取Python代码块
+                # 优先匹配 ```python ... ```
+                code_match = re.search(r'```python\n(.*?)\n```', generated_text, re.DOTALL)
+                if not code_match:
+                    # 如果没找到，尝试匹配 ``` ... ```
+                    code_match = re.search(r'```\n(.*?)\n```', generated_text, re.DOTALL)
+                if code_match:
+                    extracted_code = code_match.group(1).strip()
+                    # 验证并修正代码
+                    extracted_code = self._validate_and_fix_code(extracted_code)
+                    logger.info("成功从API响应中提取并验证Python代码块。")
+                    return extracted_code
+                else:
+                    logger.warning("API响应中未找到明确的Python代码块标记 (```python ... ``` 或 ``` ... ```)，返回完整响应。")
+                    # 如果没有代码块标记，则假设整个响应就是代码（风险较高）
+                    raw_code = generated_text.strip()
+                    # 同样进行验证修正
+                    return self._validate_and_fix_code(raw_code)
             else:
-                logger.warning("API响应中未找到明确的Python代码块标记 (```python ... ``` 或 ``` ... ```)，返回完整响应。")
-                # 如果没有代码块标记，则假设整个响应就是代码（风险较高）
-                raw_code = generated_text.strip()
-                # 同样进行验证修正
-                return self._validate_and_fix_code(raw_code)
+                logger.error(f"AnythingLLM API返回错误: {response.status_code} - {response.text}")
+                return None
 
-        except openai.AuthenticationError as e:
-            logger.error(f"DeepSeek API 认证失败: {e}")
-            logger.error("请检查 config.yaml 中的 api_key 是否正确配置。")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"AnythingLLM API 连接失败: {e}")
+            logger.error("请检查网络连接和 AnythingLLM 服务是否正在运行。")
             return None
-        except openai.APIConnectionError as e:
-            logger.error(f"DeepSeek API 连接失败: {e}")
-            logger.error("请检查网络连接和 API base_url 是否正确。")
-            return None
-        except openai.RateLimitError as e:
-            logger.error(f"DeepSeek API 速率限制错误: {e}")
-            logger.error("请检查API配额或稍后重试。")
+        except requests.exceptions.Timeout as e:
+            logger.error(f"AnythingLLM API 请求超时: {e}")
             return None
         except Exception as e:
-            logger.error(f"调用DeepSeek API生成策略时发生未知错误: {e}")
+            logger.error(f"调用AnythingLLM API生成策略时发生未知错误: {e}")
             import traceback
             traceback.print_exc()
             return None
