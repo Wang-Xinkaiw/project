@@ -22,8 +22,9 @@ def l1(A, B, opts=None, strategy=None):
             opts.max_mu     -   maximum stepsize
             opts.rho        -   rho>=1, ratio used to increase mu
             opts.DEBUG      -   0 or 1
-    strategy : object, optional
-        Strategy object with update_parameters method for adaptive beta tuning
+    strategy : callable, optional
+        策略函数，签名为 adjust_beta(iteration_state: Dict[str, Any]) -> float
+        用于在每次迭代中动态调整惩罚参数 mu
 
     Returns:
     --------
@@ -89,7 +90,7 @@ def l1(A, B, opts=None, strategy=None):
         Y1 = Y1 + mu * dY1
         Y2 = Y2 + mu * dY2
         
-        # 使用策略更新 mu（如果提供了 strategy）
+        # 使用策略更新 mu（如果提供了 strategy 函数）
         if strategy is not None:
             try:
                 iteration_state = {
@@ -100,10 +101,8 @@ def l1(A, B, opts=None, strategy=None):
                     'objective': float(np.sum(np.abs(X))),
                     'converged': False
                 }
-                strategy_update = strategy.update_parameters(iteration_state)
-                if 'beta' in strategy_update:
-                    mu = float(strategy_update['beta'])
-                    mu = min(max(mu, 1e-10), max_mu)
+                mu = float(strategy(iteration_state))
+                mu = min(max(mu, 1e-10), max_mu)
             except Exception:
                 # 如果策略调用失败，使用原有更新规则
                 mu = min(rho * mu, max_mu)

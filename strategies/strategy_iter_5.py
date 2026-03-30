@@ -4,29 +4,26 @@ import numpy as np
 
 class AdaptiveBetaStrategy(BaseTuningStrategy):
     def __init__(self):
-        # 基础超参数配置 - 针对l1_regression问题调整
-        self.min_beta = 0.5         # 进一步提高最小值
-        self.max_beta = 1e4         # beta最大值保持不变
-        self.mu = 2.0               # 残差平衡阈值 - 保持成功策略
-        self.tau_inc = 1.8          # 适度增大beta增加因子
-        self.tau_dec = 1.3          # 减小beta减少因子，避免过度减小
+        # 基于历史成功策略的参数配置
+        self.initial_beta = 0.8                # 初始beta值
+        self.min_beta = 1e-8                   # beta下界
+        self.max_beta = 1e4                    # beta上界
+        self.mu = 6.8                          # 残差平衡阈值，基于历史成功策略微调
+        self.tau_inc = 1.32                    # 增大因子，比历史成功策略略低
+        self.tau_dec = 1.22                    # 减小因子，比历史成功策略略高
         
-        # 回归问题特殊处理
-        self.initial_beta = 1.0     # 初始beta值
-        self.regression_threshold = 150  # 回归问题特殊处理阈值
-        self.regression_mode = False     # 是否进入回归模式
+        # 收敛检测参数
+        self.primal_tol = 1e-4                 # 原始残差容差
+        self.dual_tol = 1e-4                   # 对偶残差容差
+        self.no_improvement_window = 5         # 无改进检测窗口
         
-        # 收敛监控
-        self.primal_history = []
-        self.dual_history = []
-        self.objective_history = []
-        self.max_history_size = 3
-        
-        # 收敛状态跟踪
-        self.last_primal = None
-        self.last_dual = None
-        self.last_objective = None
-        self.slow_progress_count = 0
+        # 自适应调整参数
+        self.last_primal_res = None            # 上一次原始残差
+        self.last_dual_res = None              # 上一次对偶残差
+        self.beta_history = []                 # beta历史记录
+        self.primal_history = []               # 原始残差历史
+        self.dual_history = []                 # 对偶残差历史
+        self.convergence_counter = 0           # 收敛计数器
         
     def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
         # 从iteration_state获取状态信息
@@ -34,159 +31,144 @@ class AdaptiveBetaStrategy(BaseTuningStrategy):
         primal_res = iteration_state.get('primal_residual', None)
         dual_res = iteration_state.get('dual_residual', None)
         current_beta = iteration_state.get('beta', self.initial_beta)
-        objective = iteration_state.get('objective', None)
         converged = iteration_state.get('converged', False)
         
-        # 初始化beta（第一次迭代）
-        if iteration == 0:
-            new_beta = self.initial_beta
-            return {'beta': float(new_beta)}
+        # 处理None值或已收敛情况
+        if primal_res is None or dual_res is None or converged:
+            return {'beta': current_beta}
         
-        # 如果已收敛，保持当前beta
-        if converged:
-            return {'beta': float(current_beta)}
+        # 初始化检查
+        if iteration == 0:
+            self.last_primal_res = primal_res
+            self.last_dual_res = dual_res
+            self.beta_history = [current_beta]
+            self.primal_history = [primal_res]
+            self.dual_history = [dual_res]
+            return {'beta': current_beta}
         
         # 更新历史记录
-        self._update_history(primal_res, dual_res, objective)
+        self.beta_history.append(current_beta)
+        self.primal_history.append(primal_res)
+        self.dual_history.append(dual_res)
         
-        # 处理缺失的残差值
-        if primal_res is None or dual_res is None:
-            return {'beta': float(current_beta)}
+        # 保持历史记录长度
+        max_history = 30
+        if len(self.beta_history) > max_history:
+            self.beta_history.pop(0)
+            self.primal_history.pop(0)
+            self.dual_history.pop(0)
         
-        # 检测是否进入回归问题模式（针对l1_regression等含噪声问题）
-        # 当迭代次数较多且残差下降缓慢时，采用单调递增策略
-        if iteration > self.regression_threshold and not converged:
-            # 检测收敛缓慢情况
-            is_slow_convergence = self._detect_slow_convergence(primal_res, dual_res, objective)
+        # 基本自适应策略：基于残差比调整
+        new_beta = current_beta
+        
+        if primal_res > 1e-12 and dual_res > 1e-12:
+            ratio = primal_res / dual_res
             
-            if is_slow_convergence:
-                self.regression_mode = True
-                self.slow_progress_count += 1
+            # 计算残差变化的相对量
+            if self.last_primal_res is not None and self.last_dual_res is not None:
+                primal_change = abs(primal_res - self.last_primal_res) / (self.last_primal_res + 1e-12)
+                dual_change = abs(dual_res - self.last_dual_res) / (self.last_dual_res + 1e-12)
                 
-                # 回归问题特殊处理：beta单调递增策略
-                if self.slow_progress_count >= 3:
-                    # 连续3次迭代进展缓慢，采用更激进的增长
-                    new_beta = current_beta * 2.2
-                    self.slow_progress_count = 0
+                # 如果残差变化剧烈，采用更温和的调整
+                if primal_change > 0.5 or dual_change > 0.5:
+                    # 变化剧烈，采用更温和的调整因子
+                    tau_inc = 1.0 + (self.tau_inc - 1.0) * 0.7
+                    tau_dec = 1.0 + (self.tau_dec - 1.0) * 0.7
                 else:
-                    # 适度增长
-                    new_beta = current_beta * 1.5
+                    tau_inc = self.tau_inc
+                    tau_dec = self.tau_dec
             else:
-                # 正常进展，回归模式下仍然适度增长
-                if self.regression_mode:
-                    new_beta = current_beta * 1.2
+                tau_inc = self.tau_inc
+                tau_dec = self.tau_dec
+            
+            # 标准残差比调整逻辑
+            if ratio > self.mu:
+                new_beta = current_beta * tau_inc
+            elif ratio < 1.0 / self.mu:
+                new_beta = current_beta / tau_dec
+            else:
+                # 残差平衡，保持beta不变
+                new_beta = current_beta
+        
+        # 收敛加速策略
+        if iteration > 10:
+            # 检测是否在收敛
+            if len(self.primal_history) >= 3 and len(self.dual_history) >= 3:
+                recent_primal = self.primal_history[-3:]
+                recent_dual = self.dual_history[-3:]
+                
+                # 检查是否在下降
+                primal_decreasing = all(recent_primal[i] <= recent_primal[i-1] * 1.05 for i in range(1, 3))
+                dual_decreasing = all(recent_dual[i] <= recent_dual[i-1] * 1.05 for i in range(1, 3))
+                
+                if primal_decreasing and dual_decreasing:
+                    self.convergence_counter += 1
                 else:
-                    # 标准策略
-                    new_beta = self._standard_admm_strategy(current_beta, primal_res, dual_res, iteration)
-                self.slow_progress_count = max(0, self.slow_progress_count - 1)
-        else:
-            # 正常情况使用标准策略
-            new_beta = self._standard_admm_strategy(current_beta, primal_res, dual_res, iteration)
-            self.regression_mode = False
+                    self.convergence_counter = max(0, self.convergence_counter - 1)
+                
+                # 如果连续多次迭代在收敛，调整策略
+                if self.convergence_counter >= 3:
+                    # 收敛趋势良好，轻微调整以加速
+                    if primal_res > dual_res * 1.5:
+                        new_beta = min(new_beta * 1.05, self.max_beta)
+                    elif dual_res > primal_res * 1.5:
+                        new_beta = max(new_beta / 1.05, self.min_beta)
+        
+        # 无改进检测
+        if iteration > 20:
+            if len(self.primal_history) >= self.no_improvement_window + 1:
+                # 检查最近几次迭代是否没有改进
+                window_start = -self.no_improvement_window - 1
+                window_end = -1
+                
+                recent_primal = self.primal_history[window_start:window_end]
+                recent_dual = self.dual_history[window_start:window_end]
+                
+                # 计算平均改进
+                primal_improvement = sum(recent_primal[i] - recent_primal[i+1] for i in range(len(recent_primal)-1))
+                dual_improvement = sum(recent_dual[i] - recent_dual[i+1] for i in range(len(recent_dual)-1))
+                
+                # 如果没有改进，尝试调整beta
+                if primal_improvement < 0 and dual_improvement < 0:
+                    if primal_res > dual_res * 3:
+                        new_beta = min(new_beta * 1.5, self.max_beta)
+                    elif dual_res > primal_res * 3:
+                        new_beta = max(new_beta / 1.5, self.min_beta)
+        
+        # 早期迭代稳定性控制
+        if iteration < 5:
+            # 限制早期变化幅度
+            max_early_change = 1.25
+            if new_beta > current_beta * max_early_change:
+                new_beta = current_beta * max_early_change
+            elif new_beta < current_beta / max_early_change:
+                new_beta = current_beta / max_early_change
         
         # 限制beta范围
         new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+        
+        # 更新上一次残差
+        self.last_primal_res = primal_res
+        self.last_dual_res = dual_res
+        
         return {'beta': float(new_beta)}
-    
-    def _update_history(self, primal_res: float, dual_res: float, objective: float) -> None:
-        """更新历史记录"""
-        if primal_res is not None:
-            self.primal_history.append(primal_res)
-        if dual_res is not None:
-            self.dual_history.append(dual_res)
-        if objective is not None:
-            self.objective_history.append(objective)
-        
-        # 保持历史记录大小
-        if len(self.primal_history) > self.max_history_size:
-            self.primal_history.pop(0)
-        if len(self.dual_history) > self.max_history_size:
-            self.dual_history.pop(0)
-        if len(self.objective_history) > self.max_history_size:
-            self.objective_history.pop(0)
-        
-        # 保存最新值
-        self.last_primal = primal_res
-        self.last_dual = dual_res
-        self.last_objective = objective
-    
-    def _detect_slow_convergence(self, primal_res: float, dual_res: float, objective: float) -> bool:
-        """检测收敛缓慢的情况"""
-        if len(self.primal_history) < 2 or len(self.objective_history) < 2:
-            return False
-        
-        # 检查残差变化率
-        if self.primal_history[0] is not None and primal_res is not None:
-            primal_change = abs(primal_res - self.primal_history[0]) / (self.primal_history[0] + 1e-12)
-        else:
-            primal_change = 0
-        
-        # 检查目标函数变化率
-        if (len(self.objective_history) >= 2 and 
-            self.objective_history[-1] is not None and 
-            self.objective_history[0] is not None and
-            abs(self.objective_history[0]) > 1e-12):
-            objective_change = abs(self.objective_history[-1] - self.objective_history[0]) / (abs(self.objective_history[0]) + 1e-12)
-        else:
-            objective_change = 0
-        
-        # 判断条件：残差变化很小且目标函数变化很小
-        return primal_change < 0.02 and objective_change < 0.02
-    
-    def _standard_admm_strategy(self, current_beta: float, 
-                               primal_res: float, dual_res: float,
-                               iteration: int) -> float:
-        """标准ADMM自适应调整策略"""
-        # 处理极小的对偶残差
-        if dual_res < 1e-12:
-            return current_beta
-        
-        # 计算残差比
-        ratio = primal_res / (dual_res + 1e-12)
-        
-        # 根据迭代阶段调整策略参数
-        if iteration < 30:
-            # 早期阶段：保守调整，避免过早增大beta
-            local_mu = self.mu * 0.8
-            local_tau_inc = 1.3
-            local_tau_dec = 1.2
-        elif iteration < 100:
-            # 中期阶段：适度调整
-            local_mu = self.mu
-            local_tau_inc = self.tau_inc
-            local_tau_dec = self.tau_dec
-        else:
-            # 后期阶段：更倾向于增加beta以促进收敛
-            local_mu = self.mu * 0.9  # 稍微降低阈值，使更容易增加beta
-            local_tau_inc = min(self.tau_inc * 1.1, 2.0)
-            local_tau_dec = max(self.tau_dec * 0.8, 1.1)
-        
-        # 基于残差比调整beta
-        if ratio > local_mu:
-            # 原始残差过大，增加惩罚强度
-            new_beta = current_beta * local_tau_inc
-        elif ratio < 1.0 / local_mu:
-            # 对偶残差过大，减少惩罚强度
-            new_beta = current_beta / local_tau_dec
-        else:
-            # 残差平衡，保持当前beta
-            new_beta = current_beta
-        
-        return new_beta
     
     def get_parameters(self) -> Dict[str, Any]:
         return {
+            'initial_beta': self.initial_beta,
             'min_beta': self.min_beta,
             'max_beta': self.max_beta,
             'mu': self.mu,
             'tau_inc': self.tau_inc,
             'tau_dec': self.tau_dec,
-            'initial_beta': self.initial_beta,
-            'regression_threshold': self.regression_threshold,
-            'max_history_size': self.max_history_size
+            'primal_tol': self.primal_tol,
+            'dual_tol': self.dual_tol,
+            'no_improvement_window': self.no_improvement_window
         }
     
     def set_parameters(self, params: Dict[str, Any]) -> None:
+        if 'initial_beta' in params:
+            self.initial_beta = params['initial_beta']
         if 'min_beta' in params:
             self.min_beta = params['min_beta']
         if 'max_beta' in params:
@@ -197,9 +179,9 @@ class AdaptiveBetaStrategy(BaseTuningStrategy):
             self.tau_inc = params['tau_inc']
         if 'tau_dec' in params:
             self.tau_dec = params['tau_dec']
-        if 'initial_beta' in params:
-            self.initial_beta = params['initial_beta']
-        if 'regression_threshold' in params:
-            self.regression_threshold = params['regression_threshold']
-        if 'max_history_size' in params:
-            self.max_history_size = params['max_history_size']
+        if 'primal_tol' in params:
+            self.primal_tol = params['primal_tol']
+        if 'dual_tol' in params:
+            self.dual_tol = params['dual_tol']
+        if 'no_improvement_window' in params:
+            self.no_improvement_window = params['no_improvement_window']

@@ -75,13 +75,13 @@ class StrategyEvaluator:
     
     def load_strategy(self, strategy_path: str):
         """
-        动态加载策略模块
+        动态加载策略模块，获取 adjust_beta 函数
         
         Args:
             strategy_path: 策略文件路径
             
         Returns:
-            策略类实例
+            adjust_beta 函数
         """
         try:
             # 生成模块名
@@ -96,31 +96,27 @@ class StrategyEvaluator:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
             
-            # 查找策略类（继承 BaseTuningStrategy 的类）
-            from strategies.base_strategy import BaseTuningStrategy
+            # 查找 adjust_beta 函数
+            adjust_beta_func = getattr(module, 'adjust_beta', None)
             
-            strategy_class = None
-            for name in dir(module):
-                obj = getattr(module, name)
-                if (isinstance(obj, type) and 
-                    issubclass(obj, BaseTuningStrategy) and 
-                    obj is not BaseTuningStrategy):
-                    strategy_class = obj
-                    break
+            if adjust_beta_func is None:
+                raise ValueError(f"在 {strategy_path} 中未找到 adjust_beta 函数")
             
-            if strategy_class is None:
-                raise ValueError(f"在 {strategy_path} 中未找到有效的策略类")
+            # 验证函数签名
+            import inspect
+            sig = inspect.signature(adjust_beta_func)
+            params = list(sig.parameters.keys())
             
-            # 实例化策略
-            strategy_instance = strategy_class()
+            if len(params) != 1 or params[0] != 'iteration_state':
+                raise ValueError(f"adjust_beta 函数签名不正确，应为 adjust_beta(iteration_state)，实际为：{params}")
             
-            # 验证策略
-            is_valid, message = BaseTuningStrategy.validate_strategy(strategy_instance)
-            if not is_valid:
-                raise ValueError(f"策略验证失败：{message}")
+            # 检查返回值类型注解（如果有）
+            return_annotation = sig.return_annotation
+            if return_annotation != inspect.Parameter.empty and return_annotation != float:
+                logger.warning(f"adjust_beta 函数返回值类型应为 float，实际为：{return_annotation}")
             
-            logger.info(f"成功加载策略：{strategy_class.__name__}")
-            return strategy_instance
+            logger.info(f"成功加载策略函数：adjust_beta")
+            return adjust_beta_func
             
         except Exception as e:
             logger.error(f"加载策略失败：{e}")
@@ -294,13 +290,13 @@ class StrategyEvaluator:
         
         return wrapper
     
-    def evaluate_on_problem(self, problem_name: str, strategy_instance) -> Dict[str, Any]:
+    def evaluate_on_problem(self, problem_name: str, strategy_func) -> Dict[str, Any]:
         """
-        在单个问题上评估策略（使用策略动态调整 beta 参数）
+        在单个问题上评估策略（使用策略函数动态调整 beta 参数）
         
         Args:
             problem_name: 问题名称
-            strategy_instance: 策略实例
+            strategy_func: adjust_beta 策略函数
             
         Returns:
             评估结果字典
@@ -325,7 +321,7 @@ class StrategyEvaluator:
             
             # 调用带策略的算法执行
             result = self._run_algorithm_with_strategy(
-                algo_module, func_name, test_data, strategy_instance
+                algo_module, func_name, test_data, strategy_func
             )
             
             end_time = datetime.now()
@@ -351,7 +347,7 @@ class StrategyEvaluator:
                 'final_objective': obj,
                 'final_error': err,
                 'duration_seconds': duration,
-                'strategy_params': strategy_instance.get_parameters() if hasattr(strategy_instance, 'get_parameters') else {}
+                'strategy_params': {}  # 函数策略没有 get_parameters 方法
             }
             
             logger.info(f"问题 {problem_name} 评估完成：iterations={iterations}, converged={converged}")
@@ -368,11 +364,20 @@ class StrategyEvaluator:
                 'converged': False
             }
     
-    def _run_algorithm_with_strategy(self, algo_module, func_name, test_data, strategy_instance):
+    def _run_algorithm_with_strategy(self, algo_module, func_name, test_data, strategy_func):
         """
-        使用策略动态调整 beta 参数来运行算法
+        使用策略函数动态调整 beta 参数来运行算法
         
-        直接调用 libadmm 中的算法函数，传入 strategy 参数
+        直接调用 libadmm 中的算法函数，传入 strategy 函数参数
+        
+        Args:
+            algo_module: 算法模块
+            func_name: 算法函数名
+            test_data: 测试数据元组
+            strategy_func: adjust_beta 策略函数
+            
+        Returns:
+            算法运行结果
         """
         # 获取算法函数
         algorithm_func = getattr(algo_module, func_name)
@@ -386,9 +391,9 @@ class StrategyEvaluator:
         if 'tol' not in opts:
             opts['tol'] = self.tolerance
         
-        # 直接调用算法函数，传入 strategy 参数
-        # 算法函数会自动在每次迭代中调用 strategy.update_parameters()
-        result = algorithm_func(*test_data[:-1], strategy=strategy_instance)
+        # 直接调用算法函数，传入 strategy 函数参数
+        # 算法函数会在每次迭代中调用 strategy_func(iteration_state)
+        result = algorithm_func(*test_data[:-1], strategy=strategy_func)
         
         return result
     
@@ -418,7 +423,7 @@ class StrategyEvaluator:
         
         # 加载策略
         try:
-            strategy_instance = self.load_strategy(strategy_path)
+            strategy_func = self.load_strategy(strategy_path)
         except Exception as e:
             logger.error(f"策略加载失败，无法继续评估：{e}")
             return {name: {'error': f'策略加载失败：{str(e)}', 'converged': False, 'iterations': self.max_iterations} 
@@ -427,7 +432,7 @@ class StrategyEvaluator:
         # 在每个问题上评估
         results = {}
         for problem_name in problem_names:
-            result = self.evaluate_on_problem(problem_name, strategy_instance)
+            result = self.evaluate_on_problem(problem_name, strategy_func)
             results[problem_name] = result
         
         # 计算总体统计信息

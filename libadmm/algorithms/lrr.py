@@ -110,11 +110,47 @@ def lrr(A, B, lambda_, opts=None, strategy=None):
 
             except Exception:
 
-                mu = min(rho * mu, max_mu)
+                # 使用策略更新 mu（如果提供了 strategy 函数）
+                if strategy is not None:
+                    try:
+                        iteration_state = {
+                            'iteration': iteration,
+                            'primal_residual': float(np.linalg.norm(dY1, 'fro')),
+                            'dual_residual': float(np.linalg.norm(dY2, 'fro')),
+                            'beta': mu,
+                            'objective': float(obj) if 'obj' in locals() else 0.0,
+                            'converged': False
+                        }
+                        mu = float(strategy(iteration_state))
+                        mu = min(max(mu, 1e-10), max_mu)
+                    except Exception:
+                        # 如果策略调用失败，使用原有更新规则
+                        mu = min(rho * mu, max_mu)
+                else:
+                    # 原有更新规则
+                    mu = min(rho * mu, max_mu)
 
         else:
 
-            mu = min(rho * mu, max_mu)
+            # 使用策略更新 mu（如果提供了 strategy 函数）
+            if strategy is not None:
+                try:
+                    iteration_state = {
+                        'iteration': iteration,
+                        'primal_residual': float(np.linalg.norm(dY1, 'fro')),
+                        'dual_residual': float(np.linalg.norm(dY2, 'fro')),
+                        'beta': mu,
+                        'objective': float(obj) if 'obj' in locals() else 0.0,
+                        'converged': False
+                    }
+                    mu = float(strategy(iteration_state))
+                    mu = min(max(mu, 1e-10), max_mu)
+                except Exception:
+                    # 如果策略调用失败，使用原有更新规则
+                    mu = min(rho * mu, max_mu)
+            else:
+                # 原有更新规则
+                mu = min(rho * mu, max_mu)
 
     obj = nuclearnormJ + lambda_ * comp_loss(E, loss)
     err = np.sqrt(np.linalg.norm(dY1, 'fro') ** 2 + np.linalg.norm(dY2, 'fro') ** 2)

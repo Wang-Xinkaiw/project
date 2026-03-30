@@ -24,19 +24,18 @@ class StrategyGenerator:
 
     def _build_system_prompt(self):
         """
-        构建系统提示，专业指导 DeepSeek 生成 ADMM 惩罚参数调整策略
+        构建系统提示，专业指导 DeepSeek 生成 ADMM 惩罚参数调整策略函数
         """
-        return """你是一名 ADMM 算法优化专家，专门编写惩罚参数β(beta) 的自适应调整策略。
+        return """你是一名 ADMM 算法优化专家，专门编写惩罚参数β(beta) 的自适应调整策略函数。
 
 【核心任务】
-生成一个 Python 类，用于在 ADMM 算法的每次迭代中动态调整惩罚参数β的值。
+生成一个 Python 函数，用于在 ADMM 算法的每次迭代中动态调整惩罚参数β的值。
 
 【强制技术要求】
-1. 类继承：必须继承 BaseTuningStrategy 基类
-2. 方法签名：update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]
-3. 参数获取：必须从 iteration_state 字典获取信息，禁止使用其他参数名
-4. 返回值：必须返回 {'beta': new_beta_value} 格式的字典
-5. 代码格式：必须用 ```python 和 ``` 包裹完整代码
+1. 函数签名：def adjust_beta(iteration_state: Dict[str, Any]) -> float:
+2. 参数获取：必须从 iteration_state 字典获取信息，禁止使用其他参数名
+3. 返回值：必须直接返回 float 类型的 new_beta 值（不是字典）
+4. 代码格式：必须用 ```python 和 ``` 包裹完整代码
 
 【iteration_state 字典的键】
 - iteration: int，当前迭代次数
@@ -58,94 +57,89 @@ class StrategyGenerator:
 5. tracelasso：Trace Lasso 问题
    - β需考虑设计矩阵的相关性
 
-【正确示例 - 标准 ADMM 策略】
+【正确示例 - 标准 ADMM 策略函数】
 ```python
-from strategies.base_strategy import BaseTuningStrategy
 from typing import Dict, Any
 import numpy as np
 
-class MyADMMStrategy(BaseTuningStrategy):
-    def __init__(self):
-        # 超参数配置
-        self.min_beta = 1e-6      # beta 下界
-        self.max_beta = 1e6       # beta 上界
-        self.mu = 10.0            # 残差平衡阈值
-        self.tau_inc = 2.0        # beta 增大因子
-        self.tau_dec = 2.0        # beta 减小因子
-        
-    def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
-        # 从 iteration_state 获取状态信息
-        primal_res = iteration_state.get('primal_residual', 1.0)
-        dual_res = iteration_state.get('dual_residual', 1.0)
-        current_beta = iteration_state.get('beta', 1.0)
-        
-        # 处理 None 值
-        if primal_res is None or dual_res is None:
-            return {'beta': current_beta}
-        
-        # 基于残差比的自适应调整
-        if dual_res > 1e-10:
-            ratio = primal_res / dual_res
-            if ratio > self.mu:
-                # 原始残差大，增大 beta
-                new_beta = current_beta * self.tau_inc
-            elif ratio < 1.0 / self.mu:
-                # 对偶残差大，减小 beta
-                new_beta = current_beta / self.tau_dec
-            else:
-                # 残差平衡，保持 beta
-                new_beta = current_beta
+def adjust_beta(iteration_state: Dict[str, Any]) -> float:
+    \"\"\"
+    ADMM 惩罚参数 beta 自适应调整策略
+    
+    Args:
+        iteration_state: 包含当前迭代状态的字典
+            - iteration: 当前迭代次数
+            - primal_residual: 原始残差
+            - dual_residual: 对偶残差
+            - beta: 当前 beta 值
+            - objective: 目标函数值
+            - converged: 是否收敛
+    
+    Returns:
+        float: 调整后的 beta 值
+    \"\"\"
+    # 从 iteration_state 获取状态信息
+    primal_res = iteration_state.get('primal_residual', 1.0)
+    dual_res = iteration_state.get('dual_residual', 1.0)
+    current_beta = iteration_state.get('beta', 1.0)
+    iteration = iteration_state.get('iteration', 0)
+    
+    # 处理 None 值
+    if primal_res is None or dual_res is None:
+        return current_beta
+    
+    # 超参数配置
+    min_beta = 1e-6      # beta 下界
+    max_beta = 1e6       # beta 上界
+    mu = 10.0            # 残差平衡阈值
+    tau_inc = 2.0        # beta 增大因子
+    tau_dec = 2.0        # beta 减小因子
+    
+    # 基于残差比的自适应调整
+    if dual_res > 1e-10:
+        ratio = primal_res / dual_res
+        if ratio > mu:
+            # 原始残差大，增大 beta
+            new_beta = current_beta * tau_inc
+        elif ratio < 1.0 / mu:
+            # 对偶残差大，减小 beta
+            new_beta = current_beta / tau_dec
         else:
+            # 残差平衡，保持 beta
             new_beta = current_beta
-        
-        # 限制 beta 范围
-        new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
-        return {'beta': float(new_beta)}
+    else:
+        new_beta = current_beta
     
-    def get_parameters(self) -> Dict[str, Any]:
-        return {
-            'min_beta': self.min_beta,
-            'max_beta': self.max_beta,
-            'mu': self.mu,
-            'tau_inc': self.tau_inc,
-            'tau_dec': self.tau_dec
-        }
-    
-    def set_parameters(self, params: Dict[str, Any]) -> None:
-        if 'min_beta' in params:
-            self.min_beta = params['min_beta']
-        if 'max_beta' in params:
-            self.max_beta = params['max_beta']
-        if 'mu' in params:
-            self.mu = params['mu']
-        if 'tau_inc' in params:
-            self.tau_inc = params['tau_inc']
-        if 'tau_dec' in params:
-            self.tau_dec = params['tau_dec']
+    # 限制 beta 范围
+    new_beta = np.clip(new_beta, min_beta, max_beta)
+    return float(new_beta)
 ```
 
 【错误示例 - 绝对禁止】
 ```python
-# ❌ 错误 1：使用错误的参数名
-def update_parameters(self, residuals, beta):  # 禁止！
+# ❌ 错误 1：定义类而不是函数
+class BetaAdjuster:  # 禁止！需要的是函数不是类
 
-# ❌ 错误 2：使用多个独立参数
-def update_parameters(self, primal_residual, dual_residual, beta):  # 禁止！
+# ❌ 错误 2：使用错误的参数名
+def adjust_beta(residuals, beta):  # 禁止！
 
-# ❌ 错误 3：缺少返回值
-def update_parameters(self, iteration_state):
-    new_beta = 1.0  # 没有 return {'beta': ...}
+# ❌ 错误 3：使用多个独立参数
+def adjust_beta(primal_residual, dual_residual, beta):  # 禁止！
 
-# ❌ 错误 4：返回格式错误
-def update_parameters(self, iteration_state):
-    return new_beta  # 禁止！必须返回字典 {'beta': value}
+# ❌ 错误 4：返回类型错误
+def adjust_beta(iteration_state):
+    return {'beta': new_beta}  # 禁止！必须直接返回 float
+
+# ❌ 错误 5：没有返回值
+def adjust_beta(iteration_state):
+    new_beta = 1.0  # 没有 return
 ```
 
 【输出要求】
-1. 只输出完整的 Python 代码，不要解释说明
+1. 只输出完整的 Python 函数代码，不要解释说明
 2. 代码必须用 ```python 和 ``` 包裹
 3. 必须包含所有必要的 import 语句
-4. 必须实现 update_parameters, get_parameters, set_parameters 三个方法
+4. 必须实现 adjust_beta 函数，签名严格符合要求
 """
 
     def _validate_and_fix_code(self, code: str) -> str:
@@ -159,10 +153,6 @@ def update_parameters(self, iteration_state):
             验证/修正后的代码
         """
         # 1. 确保有正确的导入语句
-        if 'from strategies.base_strategy import BaseTuningStrategy' not in code:
-            code = 'from strategies.base_strategy import BaseTuningStrategy\n' + code
-            logger.info("自动添加 BaseTuningStrategy 导入语句")
-        
         if 'from typing import Dict, Any' not in code:
             if 'from typing import' in code:
                 if 'Dict' not in code or 'Any' not in code:
@@ -171,40 +161,45 @@ def update_parameters(self, iteration_state):
                 code = 'from typing import Dict, Any\n' + code
                 logger.info("自动添加 typing 导入语句")
         
-        # 2. 检测并修正错误的方法签名
+        # 2. 检测并修正错误的函数签名
         wrong_signature_patterns = [
-            r'def update_parameters\s*\(\s*self\s*,\s*residuals[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*residual[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*params[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*parameters[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*variables[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*vars[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*beta[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*rho[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*state\s*[^i][^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*primal[^)]*\)',
-            r'def update_parameters\s*\(\s*self\s*,\s*dual[^)]*\)',
+            r'def adjust_beta\s*\(\s*residuals[^)]*\)',
+            r'def adjust_beta\s*\(\s*residual[^)]*\)',
+            r'def adjust_beta\s*\(\s*params[^)]*\)',
+            r'def adjust_beta\s*\(\s*parameters[^)]*\)',
+            r'def adjust_beta\s*\(\s*variables[^)]*\)',
+            r'def adjust_beta\s*\(\s*vars[^)]*\)',
+            r'def adjust_beta\s*\(\s*beta[^)]*\)',
+            r'def adjust_beta\s*\(\s*rho[^)]*\)',
+            r'def adjust_beta\s*\(\s*state\s*[^i][^)]*\)',
+            r'def adjust_beta\s*\(\s*primal[^)]*\)',
+            r'def adjust_beta\s*\(\s*dual[^)]*\)',
+            r'def update_parameters.*',  # 禁止使用 update_parameters
         ]
         
-        correct_signature = 'def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:'
+        correct_signature = 'def adjust_beta(iteration_state: Dict[str, Any]) -> float:'
         
         for pattern in wrong_signature_patterns:
             if re.search(pattern, code):
                 logger.warning(f"检测到错误的方法签名模式：{pattern}")
                 code = re.sub(pattern + r'[^:]*:', correct_signature, code)
-                logger.info("已自动修正方法签名")
+                logger.info("已自动修正函数签名")
         
         # 3. 验证是否有正确的签名
-        if 'def update_parameters(self, iteration_state' not in code:
-            if 'def update_parameters' in code:
-                logger.warning("代码中存在 update_parameters 方法但签名可能不正确")
+        if 'def adjust_beta(self, iteration_state' not in code and 'def adjust_beta(iteration_state' not in code:
+            if 'def adjust_beta' in code:
+                logger.warning("代码中存在 adjust_beta 函数但签名可能不正确")
             else:
-                logger.error("代码中未找到 update_parameters 方法")
+                logger.error("代码中未找到 adjust_beta 函数")
         
         # 4. 检查是否有 numpy 导入（如果代码中使用了 np）
         if 'np.' in code and 'import numpy' not in code:
             code = 'import numpy as np\n' + code
             logger.info("自动添加 numpy 导入语句")
+        
+        # 5. 检查是否错误地定义了类
+        if re.search(r'class\s+\w+.*:', code):
+            logger.warning("检测到类定义，策略应该是函数而不是类")
         
         return code
 
