@@ -16,7 +16,7 @@ def _diagAtB(A, B):
     return v
 
 
-def tracelasso(A, b, opts=None):
+def tracelasso(A, b, opts=None, strategy=None):
     """
     Solve the trace Lasso minimization problem by ADMM
 
@@ -75,7 +75,43 @@ def tracelasso(A, b, opts=None):
 
         Y1 = Y1 + mu * dY1
         Y2 = Y2 + mu * dY2
-        mu = min(rho * mu, max_mu)
+        # 使用策略更新 mu（如果提供了 strategy）
+
+        if strategy is not None:
+
+            try:
+
+                iteration_state = {
+
+                    'iteration': iteration,
+
+                    'primal_residual': float(np.linalg.norm(dY1, 'fro')),
+
+                    'dual_residual': float(np.linalg.norm(dY2, 'fro')),
+
+                    'beta': mu,
+
+                    'objective': float(obj_temp),
+
+                    'converged': False
+
+                }
+
+                strategy_update = strategy.update_parameters(iteration_state)
+
+                if 'beta' in strategy_update:
+
+                    mu = float(strategy_update['beta'])
+
+                    mu = min(max(mu, 1e-10), max_mu)
+
+            except Exception:
+
+                mu = min(rho * mu, max_mu)
+
+        else:
+
+            mu = min(rho * mu, max_mu)
 
     obj = nuclearnorm
     err = np.sqrt(np.linalg.norm(dY1) ** 2 + np.linalg.norm(dY2, 'fro') ** 2)

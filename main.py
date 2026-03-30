@@ -4,7 +4,7 @@ import yaml
 import logging
 import os
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any
 from strategy_generator import StrategyGenerator
 from evaluator import StrategyEvaluator
 from feedback_loop import FeedbackLoop

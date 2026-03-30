@@ -3,7 +3,7 @@ from ..proximal_operators import prox_nuclear, prox_l1, prox_l21
 from .comp_loss import comp_loss
 
 
-def lrr(A, B, lambda_, opts=None):
+def lrr(A, B, lambda_, opts=None, strategy=None):
     """
     Solve the Low-Rank Representation minimization problem by M-ADMM
 
@@ -78,7 +78,43 @@ def lrr(A, B, lambda_, opts=None):
 
         Y1 = Y1 + mu * dY1
         Y2 = Y2 + mu * dY2
-        mu = min(rho * mu, max_mu)
+        # 使用策略更新 mu（如果提供了 strategy）
+
+        if strategy is not None:
+
+            try:
+
+                iteration_state = {
+
+                    'iteration': iteration,
+
+                    'primal_residual': float(np.linalg.norm(dY1, 'fro')),
+
+                    'dual_residual': float(np.linalg.norm(dY2, 'fro')),
+
+                    'beta': mu,
+
+                    'objective': float(obj_temp),
+
+                    'converged': False
+
+                }
+
+                strategy_update = strategy.update_parameters(iteration_state)
+
+                if 'beta' in strategy_update:
+
+                    mu = float(strategy_update['beta'])
+
+                    mu = min(max(mu, 1e-10), max_mu)
+
+            except Exception:
+
+                mu = min(rho * mu, max_mu)
+
+        else:
+
+            mu = min(rho * mu, max_mu)
 
     obj = nuclearnormJ + lambda_ * comp_loss(E, loss)
     err = np.sqrt(np.linalg.norm(dY1, 'fro') ** 2 + np.linalg.norm(dY2, 'fro') ** 2)

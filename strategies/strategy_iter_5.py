@@ -2,199 +2,320 @@ from strategies.base_strategy import BaseTuningStrategy
 from typing import Dict, Any
 import numpy as np
 
-class OptimizedAdaptiveBetaStrategy(BaseTuningStrategy):
-    """
-    优化ADMM惩罚参数beta自适应调整策略
-    
-    针对测试结果的优化：
-    1. 降低基础增长因子，避免beta增长过快
-    2. 增加残差判断阈值，减少不必要的beta调整
-    3. 移除停滞检测机制，简化策略逻辑
-    4. 回归问题采用更保守的单调增长
-    """
-    
+class EnhancedBetaStrategy(BaseTuningStrategy):
     def __init__(self):
-        # 基础参数
+        # 基础参数配置
         self.initial_beta = 1.0
-        self.max_beta = 1e4
         self.min_beta = 1e-6
+        self.max_beta = 1e4
         
-        # 自适应调整参数 - 降低增长因子
-        self.mu = 8.0  # 降低残差比阈值
-        self.tau_inc = 1.25  # 降低增长幅度
-        self.tau_dec = 1.25  # 降低减少幅度
+        # 基于历史成功策略的参数调整
+        self.mu = 9.0           # 残差平衡阈值，略高于上一轮
+        self.tau_inc = 1.8      # 增大因子
+        self.tau_dec = 1.8      # 减小因子
         
-        # 收敛检测参数
-        self.convergence_threshold = 1e-3
+        # 针对回归问题的优化参数
+        self.regression_initial_beta = 0.8      # 初始beta略降低
+        self.regression_growth_factor = 2.2     # 增长率提高
+        self.regression_max_beta = 1e4
+        self.regression_detection_threshold = 0.3  # 回归问题检测阈值
+        
+        # 低秩问题特殊处理
+        self.low_rank_smoothing_factor = 1.2    # 更平滑的调整
+        
+        # 收敛监控
+        self.primal_history = []
+        self.dual_history = []
+        self.max_history_len = 5
         
         # 状态跟踪
-        self.last_primal_res = None
-        self.last_dual_res = None
+        self.iteration_count = 0
+        self.last_primal_res = float('inf')
+        self.last_dual_res = float('inf')
+        self.problem_type = None  # 自动检测问题类型
+        
+        # 回归问题标记
+        self.is_regression_problem = False
+        self.regression_phase_started = False
         
     def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        更新ADMM参数，主要调整惩罚参数beta
-        
-        Args:
-            iteration_state: 包含迭代信息的字典，包括：
-                - iteration: 当前迭代次数
-                - primal_residual: 原始残差
-                - dual_residual: 对偶残差
-                - beta: 当前beta值
-                - objective: 目标函数值
-                - converged: 是否收敛
-                
-        Returns:
-            Dict[str, Any]: 包含更新后的参数，只返回{'beta': new_beta_value}
-        """
-        # 从iteration_state获取所有需要的信息
+        # 从iteration_state获取状态信息
+        iteration = iteration_state.get('iteration', 0)
+        primal_res = iteration_state.get('primal_residual', None)
+        dual_res = iteration_state.get('dual_residual', None)
         current_beta = iteration_state.get('beta', self.initial_beta)
-        primal_res = iteration_state.get('primal_residual')
-        dual_res = iteration_state.get('dual_residual')
         converged = iteration_state.get('converged', False)
+        objective = iteration_state.get('objective', None)
         
-        # 如果已经收敛或缺少残差信息，返回当前beta
-        if converged or primal_res is None or dual_res is None:
-            return {'beta': float(np.clip(current_beta, self.min_beta, self.max_beta))}
+        self.iteration_count = iteration
         
-        # 保存当前残差用于下次比较
+        # 首次迭代初始化
+        if iteration == 0:
+            self.problem_type = self._detect_problem_type(iteration_state)
+            if self.problem_type == "regression":
+                self.is_regression_problem = True
+                current_beta = self.regression_initial_beta
+                return {'beta': float(current_beta)}
+        
+        # 处理None值
+        if primal_res is None or dual_res is None:
+            # 针对回归问题采用单调增长策略
+            if self.is_regression_problem and iteration > 10:
+                new_beta = self._regression_monotonic_update(current_beta, iteration)
+                new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+                return {'beta': float(new_beta)}
+            return {'beta': float(current_beta)}
+        
+        # 记录历史信息
+        self._update_history(primal_res, dual_res)
+        
+        # 检测是否为回归问题（基于残差行为）
+        if iteration > 20 and not self.is_regression_problem:
+            if self._detect_regression_pattern(primal_res, dual_res, iteration):
+                self.is_regression_problem = True
+                self.regression_phase_started = True
+        
+        # 根据不同问题类型采用不同策略
+        if self.is_regression_problem:
+            # 回归问题：采用单调递增策略
+            if iteration > 50 and primal_res > 0.1:
+                # 如果残差仍然较大，采用更激进的增长
+                growth_factor = min(self.regression_growth_factor * 1.3, 3.0)
+                new_beta = current_beta * growth_factor
+            else:
+                new_beta = self._regression_monotonic_update(current_beta, iteration)
+        elif self.problem_type == "low_rank":
+            # 低秩矩阵问题：平滑调整
+            new_beta = self._low_rank_update(current_beta, primal_res, dual_res)
+        elif self.problem_type == "multi_view":
+            # 多视图聚类问题：平衡调整
+            new_beta = self._multi_view_update(current_beta, primal_res, dual_res)
+        elif self.problem_type == "tracelasso":
+            # Trace Lasso问题：考虑相关性
+            new_beta = self._tracelasso_update(current_beta, primal_res, dual_res)
+        else:
+            # 标准稀疏优化问题：自适应调整
+            new_beta = self._standard_adaptive_update(current_beta, primal_res, dual_res)
+        
+        # 额外处理：针对长时间未收敛的情况
+        if iteration > 100 and not converged:
+            if primal_res > 0.05 or dual_res > 0.05:
+                # 如果残差仍然较大，尝试更激进的调整
+                if primal_res > dual_res * 5:
+                    new_beta = min(new_beta * 2.5, self.max_beta)
+                elif dual_res > primal_res * 5:
+                    new_beta = max(new_beta / 2.5, self.min_beta)
+        
+        # 限制beta范围
+        new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+        
+        # 更新最后残差值
         self.last_primal_res = primal_res
         self.last_dual_res = dual_res
         
-        # 计算新beta值 - 使用更保守的自适应策略
-        new_beta = self._calculate_new_beta(current_beta, primal_res, dual_res, iteration_state)
-        
-        # 限制beta在有效范围内
-        new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
-        
         return {'beta': float(new_beta)}
     
-    def _calculate_new_beta(self, current_beta: float, primal_res: float, 
-                           dual_res: float, iteration_state: Dict[str, Any]) -> float:
-        """
-        计算新的beta值
+    def _detect_problem_type(self, iteration_state: Dict[str, Any]) -> str:
+        """尝试检测问题类型"""
+        # 基于可用信息和启发式方法
+        primal_res = iteration_state.get('primal_residual', None)
+        dual_res = iteration_state.get('dual_residual', None)
         
-        Args:
-            current_beta: 当前beta值
-            primal_res: 原始残差
-            dual_res: 对偶残差
-            iteration_state: 迭代状态
-            
-        Returns:
-            float: 新的beta值
-        """
-        iteration = iteration_state.get('iteration', 0)
-        
-        # 早期迭代：使用较快的增长策略
-        if iteration < 20:
-            # 前20次迭代采用较快但可控的增长
-            growth_factor = 1.2 if iteration < 5 else 1.1
-            return current_beta * growth_factor
-        
-        # 判断是否为回归问题（根据残差模式）
-        is_regression = self._is_regression_problem(iteration_state)
-        
-        if is_regression:
-            # 回归问题：beta只增不减，采用单调上升策略
-            # 基于原始残差大小调整增长幅度
-            if primal_res > 1.0:
-                growth_factor = 1.3  # 残差大，增长快
-            elif primal_res > 0.1:
-                growth_factor = 1.15  # 残差中等，中等增长
-            elif primal_res > 0.01:
-                growth_factor = 1.05  # 残差小，缓慢增长
-            else:
-                growth_factor = 1.02  # 残差很小，非常缓慢增长
-            
-            return min(current_beta * growth_factor, self.max_beta)
-        else:
-            # 非回归问题：使用经典自适应策略
-            # 避免除零错误
-            if dual_res < 1e-10:
-                return current_beta
-            
-            # 计算残差比例
-            residual_ratio = primal_res / dual_res
-            
-            if residual_ratio > self.mu:
-                # 原始残差远大于对偶残差，增加beta
-                new_beta = current_beta * self.tau_inc
-            elif residual_ratio < 1.0 / self.mu:
-                # 对偶残差远大于原始残差，减少beta
-                new_beta = current_beta / self.tau_dec
-            else:
-                # 残差平衡，保持beta不变
-                new_beta = current_beta
-            
-            return new_beta
+        # 这里只是简单的检测，实际可能需要更多信息
+        # 返回默认类型，让后续基于残差行为调整
+        return "standard"
     
-    def _is_regression_problem(self, iteration_state: Dict[str, Any]) -> bool:
-        """
-        判断是否为回归问题（l1_regression或elastic_net_regression）
-        
-        Args:
-            iteration_state: 迭代状态
+    def _detect_regression_pattern(self, primal_res: float, dual_res: float, 
+                                 iteration: int) -> bool:
+        """检测回归问题的残差模式"""
+        # 回归问题通常有噪声项，原始残差下降缓慢
+        if iteration > 30:
+            # 检查残差比例
+            if dual_res > 1e-10:
+                ratio = primal_res / dual_res
+                # 如果原始残差相对较小但对偶残差较大且下降缓慢
+                if primal_res < 0.1 and ratio < 0.2 and iteration > 50:
+                    return True
             
-        Returns:
-            bool: 是否为回归问题
-        """
-        primal_res = iteration_state.get('primal_residual')
-        dual_res = iteration_state.get('dual_residual')
-        iteration = iteration_state.get('iteration', 0)
-        
-        if primal_res is None or dual_res is None:
-            return False
-        
-        # 回归问题特征：在早期迭代中，对偶残差增长迅速
-        # 并且原始残差相对较小但对偶残差较大
-        if iteration > 50 and dual_res > 10.0 and primal_res < 1.0:
-            # 检查残差比例：对偶残差远大于原始残差
-            if dual_res > 10 * primal_res:
-                return True
-        
-        # 如果残差都很大但比例接近，也可能是回归问题
-        if primal_res > 0.5 and dual_res > 0.5:
-            ratio = primal_res / dual_res
-            if 0.5 < ratio < 2.0:
-                return True
+            # 检查历史下降趋势
+            if len(self.primal_history) >= 3:
+                recent_primal = self.primal_history[-3:]
+                primal_decline = (recent_primal[0] - recent_primal[-1]) / max(recent_primal[0], 1e-10)
                 
+                if primal_decline < 0.01 and primal_res > 0.05:
+                    return True
+        
         return False
     
-    def get_parameters(self) -> Dict[str, Any]:
-        """
-        获取策略参数
+    def _regression_monotonic_update(self, current_beta: float, iteration: int) -> float:
+        """回归问题的单调增长更新策略"""
+        # 根据问题特性说明：初始beta=0.1~1.0，增长率1.1~1.5，上限1e4
+        if iteration < 20:
+            # 早期：温和增长
+            growth = 1.2
+        elif iteration < 100:
+            # 中期：中等增长
+            growth = self.regression_growth_factor
+        elif iteration < 300:
+            # 后期：缓慢增长
+            growth = 1.1
+        else:
+            # 接近上限：微调
+            growth = 1.05
         
-        Returns:
-            Dict[str, Any]: 参数字典
-        """
+        new_beta = current_beta * growth
+        
+        # 确保不超过上限
+        return min(new_beta, self.regression_max_beta)
+    
+    def _low_rank_update(self, current_beta: float, primal_res: float, 
+                        dual_res: float) -> float:
+        """低秩矩阵问题的平滑调整策略"""
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
+        
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
+            
+            # 使用更平滑的调整策略
+            if ratio > self.mu * 1.5:
+                # 原始残差较大，适度增加
+                new_beta = current_beta * self.low_rank_smoothing_factor
+            elif ratio < 1.0 / (self.mu * 1.5):
+                # 对偶残差较大，适度减少
+                new_beta = current_beta / self.low_rank_smoothing_factor
+            else:
+                # 残差平衡，微调
+                if primal_res > 0.1:
+                    new_beta = current_beta * 1.05
+                elif primal_res < 1e-4:
+                    new_beta = current_beta * 0.95
+                else:
+                    new_beta = current_beta
+        else:
+            new_beta = current_beta
+        
+        return new_beta
+    
+    def _multi_view_update(self, current_beta: float, primal_res: float,
+                          dual_res: float) -> float:
+        """多视图聚类问题的平衡调整策略"""
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
+        
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
+            
+            # 需要协调多个视图的平衡，采用保守调整
+            if ratio > self.mu * 2:
+                new_beta = current_beta * 1.5
+            elif ratio < 1.0 / (self.mu * 2):
+                new_beta = current_beta / 1.5
+            else:
+                # 在平衡范围内，根据残差绝对值调整
+                avg_res = (primal_res + dual_res) / 2
+                if avg_res > 0.2:
+                    new_beta = current_beta * 1.2
+                elif avg_res < 0.01:
+                    new_beta = current_beta * 0.9
+                else:
+                    new_beta = current_beta
+        else:
+            new_beta = current_beta
+        
+        return new_beta
+    
+    def _tracelasso_update(self, current_beta: float, primal_res: float,
+                          dual_res: float) -> float:
+        """Trace Lasso问题的相关性感知调整"""
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
+        
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
+            
+            # 考虑设计矩阵相关性，采用适度调整
+            if ratio > self.mu * 1.8:
+                new_beta = current_beta * 1.6
+            elif ratio < 1.0 / (self.mu * 1.8):
+                new_beta = current_beta / 1.6
+            else:
+                # 根据残差绝对值和历史趋势调整
+                if primal_res > 0.15:
+                    new_beta = current_beta * 1.15
+                elif primal_res < 0.005:
+                    new_beta = current_beta * 0.85
+                else:
+                    new_beta = current_beta
+        else:
+            new_beta = current_beta
+        
+        return new_beta
+    
+    def _standard_adaptive_update(self, current_beta: float, primal_res: float,
+                                dual_res: float) -> float:
+        """标准自适应更新策略"""
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
+        
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
+            
+            # 使用配置的阈值和调整因子
+            if ratio > self.mu:
+                new_beta = current_beta * self.tau_inc
+            elif ratio < 1.0 / self.mu:
+                new_beta = current_beta / self.tau_dec
+            else:
+                # 残差平衡时，根据残差绝对值微调
+                if primal_res > 0.1:
+                    new_beta = current_beta * 1.1
+                elif primal_res < 1e-3:
+                    new_beta = current_beta * 0.95
+                else:
+                    new_beta = current_beta
+        else:
+            new_beta = current_beta
+        
+        return new_beta
+    
+    def _update_history(self, primal_res: float, dual_res: float) -> None:
+        """更新历史记录"""
+        self.primal_history.append(primal_res)
+        self.dual_history.append(dual_res)
+        
+        # 保持历史记录长度
+        if len(self.primal_history) > self.max_history_len:
+            self.primal_history.pop(0)
+            self.dual_history.pop(0)
+    
+    def get_parameters(self) -> Dict[str, Any]:
         return {
             'initial_beta': self.initial_beta,
-            'max_beta': self.max_beta,
             'min_beta': self.min_beta,
+            'max_beta': self.max_beta,
             'mu': self.mu,
             'tau_inc': self.tau_inc,
             'tau_dec': self.tau_dec,
-            'convergence_threshold': self.convergence_threshold
+            'regression_initial_beta': self.regression_initial_beta,
+            'regression_growth_factor': self.regression_growth_factor,
+            'regression_max_beta': self.regression_max_beta,
+            'regression_detection_threshold': self.regression_detection_threshold,
+            'low_rank_smoothing_factor': self.low_rank_smoothing_factor,
+            'max_history_len': self.max_history_len
         }
     
     def set_parameters(self, params: Dict[str, Any]) -> None:
-        """
-        设置策略参数
+        valid_params = [
+            'initial_beta', 'min_beta', 'max_beta', 'mu', 'tau_inc', 'tau_dec',
+            'regression_initial_beta', 'regression_growth_factor', 'regression_max_beta',
+            'regression_detection_threshold', 'low_rank_smoothing_factor', 'max_history_len'
+        ]
         
-        Args:
-            params: 参数字典
-        """
-        if 'initial_beta' in params:
-            self.initial_beta = params['initial_beta']
-        if 'max_beta' in params:
-            self.max_beta = params['max_beta']
-        if 'min_beta' in params:
-            self.min_beta = params['min_beta']
-        if 'mu' in params:
-            self.mu = params['mu']
-        if 'tau_inc' in params:
-            self.tau_inc = params['tau_inc']
-        if 'tau_dec' in params:
-            self.tau_dec = params['tau_dec']
-        if 'convergence_threshold' in params:
-            self.convergence_threshold = params['convergence_threshold']
+        for key in valid_params:
+            if key in params:
+                setattr(self, key, params[key])

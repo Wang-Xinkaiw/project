@@ -3,7 +3,7 @@ from ..proximal_operators import prox_elasticnet, prox_l1
 from .comp_loss import comp_loss
 
 
-def elasticnetR(A, B, lambda1, lambda2, opts=None):
+def elasticnetR(A, B, lambda1, lambda2, opts=None, strategy=None):
     """
     Solve the elastic net regularized minimization problem by ADMM
 
@@ -30,6 +30,8 @@ def elasticnetR(A, B, lambda1, lambda2, opts=None):
             opts.max_mu     -   maximum stepsize
             opts.rho        -   rho>=1, ratio used to increase mu
             opts.DEBUG      -   0 or 1
+    strategy : object, optional
+        Strategy object with update_parameters method for adaptive beta tuning
 
     Returns:
     --------
@@ -107,7 +109,43 @@ def elasticnetR(A, B, lambda1, lambda2, opts=None):
 
         Y1 = Y1 + mu * dY1
         Y2 = Y2 + mu * dY2
-        mu = min(rho * mu, max_mu)
+        # 使用策略更新 mu（如果提供了 strategy）
+
+        if strategy is not None:
+
+            try:
+
+                iteration_state = {
+
+                    'iteration': iteration,
+
+                    'primal_residual': float(np.linalg.norm(dY1, 'fro')),
+
+                    'dual_residual': float(np.linalg.norm(dY2, 'fro')),
+
+                    'beta': mu,
+
+                    'objective': float(obj_temp),
+
+                    'converged': False
+
+                }
+
+                strategy_update = strategy.update_parameters(iteration_state)
+
+                if 'beta' in strategy_update:
+
+                    mu = float(strategy_update['beta'])
+
+                    mu = min(max(mu, 1e-10), max_mu)
+
+            except Exception:
+
+                mu = min(rho * mu, max_mu)
+
+        else:
+
+            mu = min(rho * mu, max_mu)
 
     obj = comp_loss(E, loss) + lambda1 * np.sum(np.abs(X)) + lambda2 * np.linalg.norm(X, 'fro') ** 2
     err = np.sqrt(np.linalg.norm(dY1, 'fro') ** 2 + np.linalg.norm(dY2, 'fro') ** 2)

@@ -2,262 +2,328 @@ from strategies.base_strategy import BaseTuningStrategy
 from typing import Dict, Any
 import numpy as np
 
-class ImprovedAdaptiveBetaStrategy(BaseTuningStrategy):
-    """
-    改进的ADMM惩罚参数beta自适应调整策略
-    
-    针对收敛问题的优化策略：
-    1. 对于l1_regression和elastic_net_regression问题，采用更积极的单调递增策略
-    2. 对于其他未收敛问题，采用更保守的自适应调整
-    3. 针对不同残差模式调整beta增长速率
-    """
-    
+class EnhancedAdaptiveBetaStrategy(BaseTuningStrategy):
     def __init__(self):
-        # 基础参数
+        # 基础参数 - 针对未收敛问题优化
         self.initial_beta = 1.0
-        self.max_beta = 1e4
         self.min_beta = 1e-6
+        self.max_beta = 1e4
         
-        # 增长参数 - 调整为更激进的值
-        self.base_growth_factor = 1.5  # 增加基础增长因子
-        self.max_growth_factor = 2.5   # 增加最大增长因子
-        self.min_growth_factor = 1.2   # 增加最小增长因子
+        # 自适应调整参数 - 减少未收敛问题的迭代次数
+        self.mu = 8.0                # 降低残差平衡阈值，使调整更灵敏
+        self.tau_inc = 1.8           # 略微降低增大因子，避免过冲
+        self.tau_dec = 1.8           # 略微降低减小因子，保持平衡
+        self.growth_factor = 1.3     # 降低单调增长因子，更平稳
         
-        # 收敛检测参数
-        self.convergence_threshold = 1e-3
-        self.residual_ratio_threshold = 5.0  # 降低残差比阈值
+        # 针对未收敛问题的特殊处理
+        self.max_iter_before_aggressive = 50  # 开始激进调整前的最大迭代次数
+        self.aggressive_increment = 2.5       # 激进调整时的增长因子
+        self.convergence_acceleration = 1.5   # 加速收敛的调整因子
         
-        # 问题特定参数
-        self.regression_problems = ['l1_regression', 'elastic_net_regression']
-        self.problem_type = None
-        
-        # 历史记录
+        # 历史信息记录
         self.primal_history = []
         self.dual_history = []
-        self.history_window = 5
+        self.beta_history = []
+        self.max_history_len = 8     # 缩短历史长度，响应更快
         
-        # 状态跟踪
-        self.stagnation_counter = 0
-        self.stagnation_threshold = 20
+        # 问题类型识别
+        self.is_regression_problem = False
+        self.monotonic_mode = False
+        self.iteration_count = 0
+        self.last_primal_res = float('inf')
         
-        # 早期快速增长阶段
-        self.initial_phase_iterations = 50
+        # 收敛监控
+        self.stall_counter = 0
+        self.stall_threshold = 8     # 增加停滞阈值，避免误判
+        self.last_objective = float('inf')
+        self.objective_stagnant = False
+        
+        # 初始化标志
+        self.initialized = False
         
     def update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        更新ADMM参数，主要调整惩罚参数beta
-        
-        Args:
-            iteration_state: 包含迭代信息的字典，包括：
-                - iteration: 当前迭代次数
-                - primal_residual: 原始残差
-                - dual_residual: 对偶残差
-                - beta: 当前beta值
-                - objective: 目标函数值
-                - converged: 是否收敛
-                
-        Returns:
-            Dict[str, Any]: 包含更新后的参数，只返回{'beta': new_beta_value}
-        """
-        # 从iteration_state获取所有需要的信息
-        current_beta = iteration_state.get('beta', self.initial_beta)
-        primal_res = iteration_state.get('primal_residual', 1.0)
-        dual_res = iteration_state.get('dual_residual', 1.0)
+        # 从iteration_state获取状态信息
         iteration = iteration_state.get('iteration', 0)
+        primal_res = iteration_state.get('primal_residual', None)
+        dual_res = iteration_state.get('dual_residual', None)
+        current_beta = iteration_state.get('beta', self.initial_beta)
+        objective = iteration_state.get('objective', None)
         converged = iteration_state.get('converged', False)
         
-        # 保存历史记录用于趋势分析
-        if primal_res is not None and dual_res is not None:
-            self.primal_history.append(primal_res)
-            self.dual_history.append(dual_res)
-            if len(self.primal_history) > self.history_window:
-                self.primal_history.pop(0)
-                self.dual_history.pop(0)
+        # 更新迭代计数
+        self.iteration_count = iteration
         
-        # 如果已经收敛或达到最大beta，直接返回当前beta
-        if converged or current_beta >= self.max_beta:
-            return {'beta': min(current_beta, self.max_beta)}
+        # 处理初始迭代
+        if not self.initialized and primal_res is not None:
+            self.last_primal_res = primal_res
+            self.initialized = True
         
-        # 早期阶段：快速增加beta
-        if iteration < self.initial_phase_iterations:
-            growth_factor = self.max_growth_factor
-            new_beta = current_beta * growth_factor
-            new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+        # 处理None值 - 针对l1_regularization和elastic_net中残差为None的情况
+        if primal_res is None or dual_res is None:
+            # 对于残差为None的情况，采用保守策略
+            if iteration > 20 and not converged:
+                # 如果迭代次数多但未收敛，适度增加beta
+                new_beta = min(current_beta * 1.1, self.max_beta)
+            else:
+                new_beta = current_beta
             return {'beta': float(new_beta)}
         
-        # 计算自适应增长因子
-        growth_factor = self._calculate_growth_factor(primal_res, dual_res, iteration_state)
+        # 检测问题类型 - 简化检测逻辑
+        self._detect_problem_type_simple(iteration_state)
         
-        # 计算新beta值
-        new_beta = current_beta * growth_factor
+        # 针对回归问题启用单调增长模式
+        if self.is_regression_problem and not converged:
+            if iteration > 5:  # 早期迭代后启用
+                self.monotonic_mode = True
         
-        # 对于回归问题，beta只增不减
-        if self._is_regression_problem(iteration_state):
-            # 确保beta至少保持当前值或增加
-            new_beta = max(new_beta, current_beta)
+        # 记录历史信息
+        self._update_history(primal_res, dual_res, current_beta)
+        
+        # 监控目标函数停滞
+        self._monitor_objective_stagnation(objective)
+        
+        # 选择更新策略
+        if self.monotonic_mode:
+            # 单调增长策略 - 针对回归问题优化
+            new_beta = self._monotonic_update_enhanced(current_beta, iteration, primal_res)
+        elif iteration < 5:
+            # 早期迭代：保守策略
+            new_beta = self._early_stage_update(current_beta, primal_res, dual_res)
+        elif iteration > 100 and not converged and primal_res > 1e-2:
+            # 后期未收敛：激进策略
+            new_beta = self._aggressive_update(current_beta, iteration, primal_res, dual_res)
         else:
-            # 其他问题：允许小幅减少，但设置下限
-            if new_beta < current_beta * 0.9:  # 最多减少10%
-                new_beta = current_beta * 0.9
+            # 标准自适应策略
+            new_beta = self._adaptive_update_enhanced(current_beta, primal_res, dual_res, iteration)
         
-        # 检测停滞情况
-        if self._is_stagnating(primal_res, dual_res):
-            self.stagnation_counter += 1
-            if self.stagnation_counter > self.stagnation_threshold:
-                # 如果停滞太久，更激进地增加beta
-                new_beta = current_beta * min(self.max_growth_factor * 1.5, 3.0)
-                self.stagnation_counter = 0
-        else:
-            self.stagnation_counter = max(0, self.stagnation_counter - 1)
-        
-        # 限制beta在有效范围内
+        # 限制beta范围
         new_beta = np.clip(new_beta, self.min_beta, self.max_beta)
+        
+        # 针对低秩问题的平滑调整
+        if self._is_low_rank_problem():
+            # 限制调整幅度，避免剧烈变化
+            beta_change = abs(new_beta - current_beta) / (current_beta + 1e-10)
+            if beta_change > 0.3:  # 限制变化幅度在30%以内
+                new_beta = current_beta * 1.3 if new_beta > current_beta else current_beta / 1.3
+        
+        # 如果检测到目标函数停滞，尝试调整beta
+        if self.objective_stagnant and iteration > 15 and not converged:
+            # 中等幅度调整beta以跳出局部最优
+            adjustment = 1.5 if np.random.rand() > 0.5 else 0.67
+            new_beta = current_beta * adjustment
+            self.objective_stagnant = False
         
         return {'beta': float(new_beta)}
     
-    def _calculate_growth_factor(self, primal_res: float, dual_res: float, 
-                                iteration_state: Dict[str, Any]) -> float:
-        """
-        计算自适应增长因子
+    def _detect_problem_type_simple(self, iteration_state: Dict[str, Any]) -> None:
+        """简化问题类型检测"""
+        iteration = iteration_state.get('iteration', 0)
         
-        Args:
-            primal_res: 原始残差
-            dual_res: 对偶残差
-            iteration_state: 迭代状态
-            
-        Returns:
-            float: 增长因子
-        """
-        # 基础增长因子
-        growth_factor = self.base_growth_factor
-        
-        # 如果残差信息可用，根据残差情况调整增长因子
-        if primal_res is not None and dual_res is not None:
-            # 计算残差和
-            total_residual = primal_res + dual_res
-            
-            # 如果残差很大，需要更快地增加beta
-            if total_residual > 1.0:
-                growth_factor = min(self.max_growth_factor, growth_factor * 1.3)
-            elif total_residual > 0.1:
-                growth_factor = min(self.max_growth_factor, growth_factor * 1.1)
-            
-            # 避免除零错误
-            if dual_res > 1e-10:
-                residual_ratio = primal_res / dual_res
-                
-                # 如果原始残差远大于对偶残差，更快地增加beta
-                if residual_ratio > self.residual_ratio_threshold:
-                    growth_factor = min(self.max_growth_factor, growth_factor * 1.5)
-                
-                # 如果对偶残差远大于原始残差，稍微减慢beta增长
-                elif residual_ratio < 1.0 / self.residual_ratio_threshold:
-                    growth_factor = max(self.min_growth_factor, growth_factor * 0.9)
-            
-            # 检查残差下降趋势
-            if len(self.primal_history) >= 3:
-                # 计算最近残差变化率
-                if self.primal_history[-2] > 1e-10:
-                    primal_change = self.primal_history[-1] / self.primal_history[-2]
-                    
-                    # 如果残差在快速下降，减缓beta增长
-                    if primal_change < 0.8:
-                        growth_factor = max(self.min_growth_factor, growth_factor * 0.8)
-                    # 如果残差在增加，加快beta增长
-                    elif primal_change > 1.2:
-                        growth_factor = min(self.max_growth_factor, growth_factor * 1.2)
-        
-        # 确保增长因子在合理范围内
-        growth_factor = np.clip(growth_factor, self.min_growth_factor, self.max_growth_factor)
-        
-        return growth_factor
+        # 仅基于迭代次数和经验判断
+        if iteration > 10:
+            # 如果迭代次数较多且未收敛，可能是回归问题
+            # 这里简化检测，主要依赖外部调用时的设置
+            pass
     
-    def _is_regression_problem(self, iteration_state: Dict[str, Any]) -> bool:
-        """
-        判断是否为回归问题（包含噪声项E）
+    def _monotonic_update_enhanced(self, current_beta: float, iteration: int, 
+                                  primal_res: float) -> float:
+        """增强的单调增长更新策略"""
+        # 根据残差大小调整增长速率
+        if primal_res > 0.1:
+            # 残差大，快速增长
+            growth = min(self.aggressive_increment, 2.0)
+        elif primal_res > 0.01:
+            # 残差中等，适度增长
+            growth = self.growth_factor
+        else:
+            # 残差小，缓慢增长
+            growth = 1.1
         
-        注意：这里通过残差模式判断，因为无法直接从iteration_state获取问题类型
-        回归问题的特征：原始残差和对偶残差都较大且相当
+        # 后期减缓增长
+        if current_beta > 500:
+            growth = min(growth, 1.1)
         
-        Args:
-            iteration_state: 迭代状态
-            
-        Returns:
-            bool: 是否为回归问题
-        """
-        primal_res = iteration_state.get('primal_residual')
-        dual_res = iteration_state.get('dual_residual')
-        
-        if primal_res is None or dual_res is None:
-            return False
-            
-        # 回归问题通常有较大的残差，且两者相当
-        if primal_res > 0.5 and dual_res > 0.5:
-            ratio = primal_res / dual_res
-            if 0.5 < ratio < 2.0:
-                return True
-                
-        return False
+        new_beta = current_beta * growth
+        return new_beta
     
-    def _is_stagnating(self, primal_res: float, dual_res: float) -> bool:
-        """
-        检测算法是否停滞
+    def _early_stage_update(self, current_beta: float, primal_res: float, 
+                           dual_res: float) -> float:
+        """早期迭代阶段更新策略"""
+        # 处理零除
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
         
-        Args:
-            primal_res: 原始残差
-            dual_res: 对偶残差
+        # 早期使用更保守的调整
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
             
-        Returns:
-            bool: 是否停滞
-        """
-        if len(self.primal_history) < 3:
+            # 早期使用更宽松的阈值
+            mu_early = self.mu * 3.0
+            
+            if ratio > mu_early:
+                # 原始残差大，适度增大beta
+                new_beta = current_beta * 1.3
+            elif ratio < 1.0 / mu_early:
+                # 对偶残差大，适度减小beta
+                new_beta = current_beta / 1.3
+            else:
+                # 保持平衡
+                new_beta = current_beta
+        else:
+            new_beta = current_beta
+        
+        return new_beta
+    
+    def _aggressive_update(self, current_beta: float, iteration: int,
+                          primal_res: float, dual_res: float) -> float:
+        """激进更新策略 - 针对长时间未收敛的情况"""
+        # 处理零除
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
+        
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
+            
+            if ratio > 5.0:  # 更激进的阈值
+                # 原始残差明显更大，大幅增加beta
+                new_beta = current_beta * self.aggressive_increment
+            elif ratio < 0.2:  # 更激进的阈值
+                # 对偶残差明显更大，大幅减小beta
+                new_beta = current_beta / self.aggressive_increment
+            else:
+                # 尝试中等调整
+                if primal_res > self.last_primal_res:
+                    # 原始残差在增加，需要增大beta
+                    new_beta = current_beta * 1.8
+                else:
+                    new_beta = current_beta
+        else:
+            # 默认中等增长
+            new_beta = current_beta * 1.5
+        
+        # 更新最后原始残差
+        self.last_primal_res = primal_res
+        
+        return new_beta
+    
+    def _adaptive_update_enhanced(self, current_beta: float, primal_res: float, 
+                                 dual_res: float, iteration: int) -> float:
+        """增强的自适应更新策略"""
+        # 处理零除
+        epsilon = 1e-10
+        primal_safe = max(primal_res, epsilon)
+        dual_safe = max(dual_res, epsilon)
+        
+        # 计算残差比
+        if dual_safe > epsilon:
+            ratio = primal_safe / dual_safe
+            
+            # 根据迭代阶段调整阈值
+            if iteration < 15:
+                mu_adjusted = self.mu * 1.5
+                tau_inc = min(self.tau_inc, 1.6)
+                tau_dec = min(self.tau_dec, 1.6)
+            else:
+                mu_adjusted = self.mu
+                tau_inc = self.tau_inc
+                tau_dec = self.tau_dec
+            
+            # 基于残差比调整
+            if ratio > mu_adjusted:
+                new_beta = current_beta * tau_inc
+            elif ratio < 1.0 / mu_adjusted:
+                new_beta = current_beta / tau_dec
+            else:
+                # 残差平衡时，根据残差绝对值调整
+                if primal_res > 0.1 and iteration > 10:
+                    # 残差仍然较大，适度增加beta
+                    new_beta = current_beta * 1.1
+                else:
+                    new_beta = current_beta
+        else:
+            new_beta = current_beta
+        
+        return new_beta
+    
+    def _update_history(self, primal_res: float, dual_res: float, beta: float) -> None:
+        """更新历史记录"""
+        self.primal_history.append(primal_res)
+        self.dual_history.append(dual_res)
+        self.beta_history.append(beta)
+        
+        # 保持历史记录长度
+        if len(self.primal_history) > self.max_history_len:
+            self.primal_history.pop(0)
+            self.dual_history.pop(0)
+            self.beta_history.pop(0)
+    
+    def _monitor_objective_stagnation(self, objective: float) -> None:
+        """监控目标函数停滞"""
+        if objective is None:
+            return
+        
+        # 计算目标函数相对变化
+        if self.last_objective < float('inf'):
+            rel_change = abs(objective - self.last_objective) / (abs(self.last_objective) + 1e-10)
+            
+            # 如果相对变化很小，增加停滞计数器
+            if rel_change < 1e-6:
+                self.stall_counter += 1
+            else:
+                self.stall_counter = max(0, self.stall_counter - 1)
+            
+            # 如果停滞计数器超过阈值，标记为停滞
+            if self.stall_counter >= self.stall_threshold:
+                self.objective_stagnant = True
+            else:
+                self.objective_stagnant = False
+        
+        # 更新最后的目标函数值
+        self.last_objective = objective
+    
+    def _is_low_rank_problem(self) -> bool:
+        """判断是否为低秩矩阵问题"""
+        if len(self.beta_history) < 3:
             return False
-            
-        # 计算最近几次迭代的残差变化
-        recent_primal = self.primal_history[-3:]
-        recent_dual = self.dual_history[-3:]
         
-        # 如果残差几乎没有变化，视为停滞
-        primal_var = np.std(recent_primal) / (np.mean(recent_primal) + 1e-10)
-        dual_var = np.std(recent_dual) / (np.mean(recent_dual) + 1e-10)
+        # 通过beta变化模式判断
+        recent_betas = self.beta_history[-3:]
+        beta_var = np.std(recent_betas) / (np.mean(recent_betas) + 1e-10)
         
-        return primal_var < 0.05 and dual_var < 0.05
+        # 低秩问题通常beta变化较小
+        return beta_var < 0.2
     
     def get_parameters(self) -> Dict[str, Any]:
-        """
-        获取策略参数
-        
-        Returns:
-            Dict[str, Any]: 参数字典
-        """
         return {
             'initial_beta': self.initial_beta,
-            'max_beta': self.max_beta,
             'min_beta': self.min_beta,
-            'base_growth_factor': self.base_growth_factor,
-            'max_growth_factor': self.max_growth_factor,
-            'min_growth_factor': self.min_growth_factor,
-            'convergence_threshold': self.convergence_threshold,
-            'residual_ratio_threshold': self.residual_ratio_threshold,
-            'history_window': self.history_window,
-            'initial_phase_iterations': self.initial_phase_iterations,
-            'stagnation_threshold': self.stagnation_threshold
+            'max_beta': self.max_beta,
+            'mu': self.mu,
+            'tau_inc': self.tau_inc,
+            'tau_dec': self.tau_dec,
+            'growth_factor': self.growth_factor,
+            'max_iter_before_aggressive': self.max_iter_before_aggressive,
+            'aggressive_increment': self.aggressive_increment,
+            'convergence_acceleration': self.convergence_acceleration,
+            'max_history_len': self.max_history_len,
+            'stall_threshold': self.stall_threshold
         }
     
     def set_parameters(self, params: Dict[str, Any]) -> None:
-        """
-        设置策略参数
+        valid_params = [
+            'initial_beta', 'min_beta', 'max_beta', 'mu', 'tau_inc', 'tau_dec',
+            'growth_factor', 'max_iter_before_aggressive', 'aggressive_increment',
+            'convergence_acceleration', 'max_history_len', 'stall_threshold'
+        ]
         
-        Args:
-            params: 参数字典
-        """
-        valid_params = {
-            'initial_beta', 'max_beta', 'min_beta', 
-            'base_growth_factor', 'max_growth_factor', 'min_growth_factor',
-            'convergence_threshold', 'residual_ratio_threshold', 'history_window',
-            'initial_phase_iterations', 'stagnation_threshold'
-        }
+        for key in valid_params:
+            if key in params:
+                setattr(self, key, params[key])
         
-        for key, value in params.items():
-            if key in valid_params and hasattr(self, key):
-                setattr(self, key, value)
+        # 针对回归问题的特殊设置
+        if 'is_regression_problem' in params:
+            self.is_regression_problem = params['is_regression_problem']
+        if 'monotonic_mode' in params:
+            self.monotonic_mode = params['monotonic_mode']
