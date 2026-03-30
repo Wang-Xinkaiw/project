@@ -16,13 +16,19 @@ class FeedbackLoop:
 
     def generate_feedback(self, performance_results: Dict[str, Any], history: List[Dict[str, Any]], iteration: int) -> str:
         """
-        根据评估结果生成反馈信息
+        根据评估结果生成反馈信息，指导策略生成器进行下一轮优化
+        
+        根据当前轮次的性能评估结果和历史记录，生成有针对性的反馈意见。
+        第一轮提供基础反馈，后续轮次提供对比分析和改进建议。
+        
         Args:
-            performance_results: 当前轮次的性能结果
-            history: 历史迭代记录
-            iteration: 当前迭代轮次
+            performance_results: 当前轮次的性能结果字典
+                                格式：{problem_name: {iterations, converged, error, ...}}
+            history: 历史迭代记录列表，包含每轮的策略路径、性能等信息
+            iteration: 当前迭代轮次（int）
+            
         Returns:
-            格式化后的反馈信息
+            str: 格式化后的反馈信息字符串，包含性能分析、错误报告和改进建议
         """
         if iteration == 1:
             # 第一轮反馈
@@ -38,12 +44,27 @@ class FeedbackLoop:
 
     def format_feedback(self, current_results: Dict[str, Any], previous_results: Any = None) -> str:
         """
-        格式化反馈信息
+        格式化反馈信息，生成结构化的评估报告
+        
+        将当前轮次的评估结果格式化为易读的反馈字符串，包括：
+        - 错误分类报告（方法签名错误、运行时错误等）
+        - 总体性能指标（平均迭代次数）
+        - 与上一轮的对比分析
+        - 各问题的详细表现
+        
         Args:
-            current_results: 当前结果（字典）
-            previous_results: 上一轮结果
+            current_results: 当前结果字典
+                            格式：{problem_name: result_dict}
+                            result_dict 包含 iterations, converged, error, objective 等键
+            previous_results: 上一轮结果字典（可选），用于计算改进幅度
+            
         Returns:
-            格式化后的反馈字符串
+            str: 格式化后的反馈字符串，包含错误报告、性能分析和详细问题表现
+            
+        Notes:
+            - 自动检测并分类方法签名错误
+            - 计算相比上一轮的改进百分比
+            - 对未收敛问题标记 ✗，已收敛问题标记 ✓
         """
         feedback_parts = []
 
@@ -60,14 +81,14 @@ class FeedbackLoop:
 
         # 总体性能概览
         avg_iterations = self._calculate_average_iterations(current_results)
-        feedback_parts.append(f"当前策略在测试集上的平均迭代次数: {avg_iterations:.1f}")
+        feedback_parts.append(f"当前策略在测试集上的平均迭代次数：{avg_iterations:.1f}")
 
-        # 检查previous_results类型
+        # 检查 previous_results 类型
         if previous_results is not None and isinstance(previous_results, dict):
             prev_avg = self._calculate_average_iterations(previous_results)
             if prev_avg > 0:
                 improvement = ((prev_avg - avg_iterations) / prev_avg * 100)
-                feedback_parts.append(f"相比上一轮改进: {improvement:+.1f}%")
+                feedback_parts.append(f"相比上一轮改进：{improvement:+.1f}%")
             else:
                 feedback_parts.append("这是第一轮评估，或者上一轮数据不可用")
 

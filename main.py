@@ -611,7 +611,19 @@ class EvolutionaryTuningMain:
         return summary
 
     def _calculate_average_performance(self, results: Dict[str, Any]) -> float:
-        """计算平均性能"""
+        """
+        计算策略的平均性能指标
+        
+        遍历所有问题的评估结果，计算平均迭代次数作为性能指标。
+        对于评估出错或未收敛的问题，会给予惩罚值。
+        
+        Args:
+            results: 评估结果字典，格式为 {problem_name: result_dict}
+                    result_dict 包含 iterations, converged, error 等键
+            
+        Returns:
+            float: 平均性能值（越小越好），如果结果为空则返回无穷大
+        """
         if not results:
             return float('inf')
         total_iterations = 0
@@ -640,13 +652,21 @@ class EvolutionaryTuningMain:
     
     def _should_call_advisor(self, current_performance: float) -> bool:
         """
-        判断是否应该调用千问指导者
+        判断是否应该调用千问指导者进行深度分析
+        
+        根据性能改进情况和配置智能决定是否调用千问 API。
+        当连续多轮无性能改进时触发调用，以获得专家建议。
         
         Args:
-            current_performance: 当前策略的性能
+            current_performance: 当前策略的性能值（平均迭代次数）
             
         Returns:
-            是否应该调用千问指导者
+            bool: True 表示应该调用千问指导者，False 表示不需要调用
+            
+        Notes:
+            - 如果未启用智能调用模式，则每次都调用
+            - 连续无改进次数达到阈值时触发
+            - 第一次迭代时不调用（无历史数据参考）
         """
         # 如果未启用智能调用模式，则每次都调用
         if not self.smart_call_config.get('enabled', True):
@@ -654,7 +674,7 @@ class EvolutionaryTuningMain:
         
         # 如果连续无改进次数达到阈值，触发调用
         if self.consecutive_no_improvement >= self.smart_call_config['no_improvement_threshold']:
-            self.logger.info(f"连续无改进次数({self.consecutive_no_improvement})达到阈值({self.smart_call_config['no_improvement_threshold']})，触发千问指导者分析")
+            self.logger.info(f"连续无改进次数 ({self.consecutive_no_improvement}) 达到阈值 ({self.smart_call_config['no_improvement_threshold']})，触发千问指导者分析")
             return True
         
         # 如果是第一次迭代，不调用（因为没有历史数据）
@@ -667,13 +687,20 @@ class EvolutionaryTuningMain:
     def _record_advisor_call(self, iteration: int, reason: str, 
                             duration: float, guidance_summary: str):
         """
-        记录千问API调用历史
+        记录千问 API 调用历史，用于后续分析和避免频繁调用
+        
+        保存每次千问指导者的调用信息，包括调用原因、耗时、指导建议等。
+        如果启用了调用历史保存功能，会自动写入 JSON 文件。
         
         Args:
-            iteration: 迭代轮次
-            reason: 调用原因
-            duration: 调用耗时（秒）
-            guidance_summary: 指导建议摘要
+            iteration: 当前迭代轮次（int）
+            reason: 调用原因说明（str），如"连续无改进达到阈值"
+            duration: 调用耗时，单位为秒（float）
+            guidance_summary: 指导建议的摘要内容（str，前 200 字符）
+            
+        Side Effects:
+            - 更新 self.advisor_call_history 列表
+            - 如果启用保存，会写入 advisor_call_history.json 文件
         """
         call_record = {
             'iteration': iteration,

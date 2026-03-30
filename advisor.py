@@ -130,15 +130,29 @@ ADMM通过迭代更新原始变量x、辅助变量z和拉格朗日乘子y来求�
                                     iteration: int, 
                                     history: List[Dict[str, Any]]) -> str:
         """
-        分析评估结果并生成优化建议
+        分析评估结果并生成 ADMM 优化建议
+        
+        调用千问 API 对当前轮次的策略评估结果进行深度分析，生成专业的优化建议。
+        分析内容包括收敛模式识别、残差平衡评估、策略有效性分析等。
         
         Args:
-            evaluation_results: 7个问题的评估结果
-            iteration: 当前迭代轮次
-            history: 历史迭代记录
+            evaluation_results: 7 个问题的评估结果字典
+                               格式：{problem_name: {iterations, converged, convergence_history, ...}}
+            iteration: 当前迭代轮次（int），用于记录分析历史
+            history: 历史迭代记录列表，包含之前轮次的策略性能和结果
             
         Returns:
-            千问生成的分析和建议文本
+            str: 千问生成的分析和建议文本，包含：
+                 - 整体诊断（收敛率、平均迭代次数、主要瓶颈）
+                 - 关键问题分析（残差模式和可能原因）
+                 - 策略评估（当前策略的优缺点）
+                 - 优化建议（具体的参数调整方向）
+                 - 风险提示（可能导致性能恶化的操作）
+                 
+        Notes:
+            - 如果指导者未启用（enabled=False），返回空字符串
+            - 分析耗时会被记录到日志中
+            - 结果会自动保存到 advisor_reports 目录（如果配置了 save_reports=True）
         """
         if not self.enabled:
             return ""
@@ -148,11 +162,11 @@ ADMM通过迭代更新原始变量x、辅助变量z和拉格朗日乘子y来求�
         # 构建用户提示词
         user_prompt = self._build_user_prompt(evaluation_results, iteration, history)
         
-        # 调用千问API
+        # 调用千问 API
         guidance = self._call_qwen_api(user_prompt)
         
         duration = time.time() - start_time
-        logger.info(f"千问指导者分析完成，耗时: {duration:.2f}秒")
+        logger.info(f"千问指导者分析完成，耗时：{duration:.2f}秒")
         
         return guidance
     
