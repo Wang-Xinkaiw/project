@@ -136,20 +136,29 @@ class FeedbackLoop:
         # 此方法现在主要用于 main.py 获取初始提示语句，但核心逻辑已移到 system_prompt
         # 保留此方法以防 main.py 需要
         if algorithm_type == 'admm':
-            return """【任务】生成ADMM惩罚参数beta自适应调整策略。
+            return """【核心任务】
+                    生成一个 Python 函数，用于在 ADMM 算法的每次迭代中动态调整惩罚参数β的值。
 
-【要求】
-1. 继承BaseTuningStrategy基类
-2. 实现update_parameters, get_parameters, set_parameters方法
-3. update_parameters签名: update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]
-4. 返回{'beta': new_beta_value}
+                    【强制技术要求】
+                    1. 函数签名：def adjust_beta(iteration_state: Dict[str, Any]) -> float:
+                    2. 参数获取：必须从 iteration_state 字典获取信息，禁止使用其他参数名
+                    3. 返回值：必须直接返回 float 类型的 new_beta 值（不是字典）
+                    4. 代码格式：必须用 ```python 和 ``` 包裹完整代码
 
-【针对l1_regression和elastic_net_regression的参考策略】
-这两个问题包含噪声项E，可参考惩罚参数单调上升策略：
-- beta只增不减，初始beta=1.0，每次迭代按1.5-2.5倍增大，上限1e4
-- 此策略基于工具箱原作者经验，有助于解决收敛困难
-- 可根据实际情况灵活调整，不强制要求
-"""
+                    【iteration_state 字典的键】
+                    - iteration: int，当前迭代次数
+                    - primal_residual: float，原始残差范数（约束违反程度，||Ax-B||）
+                    - dual_residual: float，对偶残差范数（最优性条件违反程度，||x-z||）
+                    - beta: float，当前惩罚参数值（也称为 mu 或 ρ）
+                    - objective: float，目标函数值
+                    - converged: bool，是否已收敛
+
+                    【关键收敛原理 - 必须理解】
+                    ADMM 算法的收敛性依赖于原始残差和对偶残差的平衡：
+                    1. 当 primal_residual >> dual_residual 时：说明约束满足度差，需要增大 beta 加强惩罚
+                    2. 当 dual_residual >> primal_residual 时：说明对偶变量变化慢，需要减小 beta 缓解过度惩罚
+                    3. 理想状态：两个残差以相似速率下降，保持平衡
+                    """
         return ""
 
     def save_feedback(self, feedback: str, iteration: int):
@@ -227,13 +236,13 @@ class FeedbackLoop:
             feedback += "3. 平衡 `beta` 调整的探索与利用，避免过早陷入局部最优。\n"
 
         # 强调只调整β的要求
-        feedback += "\n【重要要求】请确保新策略：\n"
-        feedback += "1. `update_parameters` 方法签名: `update_parameters(self, iteration_state: Dict[str, Any])`\n"
-        feedback += "2. **只调整惩罚参数 `beta`**\n"
-        feedback += "3. 保持ADMM其他参数（如 `rho`, `tau`, `max_iterations`, `tolerance` 等）与标准版本一致，这些参数不由本策略调整。\n"
-        feedback += "4. `update_parameters` 方法只返回包含 `'beta'` 键的字典，例如 `{'beta': new_beta_value, ...}`。\n"
-        feedback += "5. 类必须继承 `BaseTuningStrategy` 基类。\n"
-        feedback += "6. 包含必要的 `import` 语句 (`numpy`, `typing`, `BaseTuningStrategy`)。\n"
+            feedback += "\n【重要要求】请确保新策略：\n"
+            feedback += "1. 函数签名：`def adjust_beta(iteration_state: Dict[str, Any]) -> float:`\n"
+            feedback += "2. **只调整惩罚参数 `beta`**\n"
+            feedback += "3. 保持ADMM其他参数（如 `rho`, `tau`, `max_iterations`, `tolerance` 等）与标准版本一致，这些参数不由本策略调整。\n"
+            feedback += "4. 函数必须直接返回 `float` 类型的 `new_beta` 值（不是字典）。\n"
+            feedback += "5. 包含必要的 `import` 语句 (`numpy`, `typing`)。\n"
+            feedback += "6. 使用标准的残差比策略，避免复杂的多阶段逻辑。\n"
 
         return feedback
 
@@ -320,12 +329,12 @@ class FeedbackLoop:
 
         # 强调技术约束
         feedback += "\n【再次强调技术约束】请确保新策略：\n"
-        feedback += "1. `update_parameters` 方法签名必须为: `update_parameters(self, iteration_state: Dict[str, Any])`\n"
+        feedback += "1. 函数签名必须为: `def adjust_beta(iteration_state: Dict[str, Any]) -> float:`\n"
         feedback += "2. **只调整惩罚参数 `beta`**，绝对不能调整 `rho`, `tau`, `max_iterations`, `tolerance` 等其他ADMM参数。\n"
         feedback += "3. 保持与标准ADMM算法的兼容性。\n"
-        feedback += "4. 返回的参数字典必须包含 `'beta'` 键，例如 `{'beta': new_beta_value}`。\n"
-        feedback += "5. 继承 `BaseTuningStrategy` 基类。\n"
-        feedback += "6. 包含必要的 `import` 语句。\n"
+        feedback += "4. 函数必须直接返回 `float` 类型的 `new_beta` 值（不是字典）。\n"
+        feedback += "5. 包含必要的 `import` 语句 (`numpy`, `typing`)。\n"
+        feedback += "6. 使用标准的残差比策略，避免复杂的多阶段逻辑。\n"
 
         return feedback
 

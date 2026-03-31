@@ -18,7 +18,6 @@ project/
 │   │
 ├── 文档文件
 │   ├── README.md                # 项目主文档（使用说明、功能介绍）
-│   ├── COMMENT_COMPLETION_REPORT.md  # 代码注释完成报告
 │   │
 ├── libadmm/                     # ADMM 算法库（核心算法实现）
 │   ├── __init__.py

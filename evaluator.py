@@ -136,91 +136,84 @@ class StrategyEvaluator:
         
         if problem_name == 'l1_regularization':
             # min_X ||X||_1, s.t. AX=B
-            d, na, nb = 50, 100, 1
+            d, na, nb = 10, 200, 100
             A = np.random.randn(d, na)
-            X_true = np.zeros((na, nb))
-            X_true[:10, :] = np.random.randn(10, nb)  # 稀疏解
-            B = A @ X_true
+            X = np.random.randn(na, nb)
+            B = A @ X
             opts = self._get_default_opts()
             return (A, B, opts)
         
         elif problem_name == 'elastic_net':
             # min_X ||X||_1+lambda*||X||_F^2, s.t. AX=B
-            d, na, nb = 50, 100, 1
+            d, na, nb = 10, 200, 100
             A = np.random.randn(d, na)
-            X_true = np.zeros((na, nb))
-            X_true[:10, :] = np.random.randn(10, nb)
-            B = A @ X_true
-            lambda_ = 0.1
+            X = np.random.randn(na, nb)
+            B = A @ X
+            lambda_ = 0.01
             opts = self._get_default_opts()
             return (A, B, lambda_, opts)
         
         elif problem_name == 'l1_regression':
             # min_{X,E} loss(E)+lambda*||X||_1, s.t. AX+E=B
-            d, na, nb = 50, 100, 1
+            d, na, nb = 10, 200, 100
             A = np.random.randn(d, na)
-            X_true = np.zeros((na, nb))
-            X_true[:10, :] = np.random.randn(10, nb)
-            B = A @ X_true + 0.1 * np.random.randn(d, nb)  # 添加噪声
-            lambda_ = 0.1
-            opts = self._get_default_opts(loss='l2')
+            X = np.random.randn(na, nb)
+            B = A @ X
+            lambda_ = 0.01
+            opts = self._get_default_opts(loss='l1')
             return (A, B, lambda_, opts)
         
         elif problem_name == 'elastic_net_regression':
             # min_{X,E} loss(E)+lambda1*||X||_1+lambda2*||X||_F^2, s.t. AX+E=B
-            d, na, nb = 50, 100, 1
+            d, na, nb = 10, 200, 100
             A = np.random.randn(d, na)
-            X_true = np.zeros((na, nb))
-            X_true[:10, :] = np.random.randn(10, nb)
-            B = A @ X_true + 0.1 * np.random.randn(d, nb)
-            lambda1 = 0.1
-            lambda2 = 0.1
-            opts = self._get_default_opts(loss='l2')
+            X = np.random.randn(na, nb)
+            B = A @ X
+            lambda1 = 10.0
+            lambda2 = 10.0
+            opts = self._get_default_opts(loss='l1')
             return (A, B, lambda1, lambda2, opts)
         
         elif problem_name == 'low_rank_matrix_completion':
             # min_X ||X||_*, s.t. P_Omega(X) = P_Omega(M)
-            d, n = 50, 50
-            rank = 5
-            U = np.random.randn(d, rank)
-            V = np.random.randn(n, rank)
-            M = U @ V.T
+            n1, n2 = 100, 200
+            r = 5
+            X = np.random.randn(n1, r) @ np.random.randn(r, n2)
             
             # 随机采样
-            sample_ratio = 0.3
-            num_samples = int(d * n * sample_ratio)
-            indices = np.random.choice(d * n, num_samples, replace=False)
+            p = 0.6
+            omega = np.where(np.random.rand(n1, n2) < p)
+            M = np.zeros((n1, n2))
+            M[omega] = X[omega]
             
             opts = self._get_default_opts()
-            return (M, indices, opts)
+            return (M, omega, opts)
         
         elif problem_name == 'low_rank_representation':
             # min_{X,E} ||X||_*+lambda*loss(E), s.t. A=BX+E
             d, na, nb = 50, 100, 50
-            B = np.random.randn(d, nb)
-            X_true = np.zeros((nb, na))
-            X_true[:rank, :] = np.random.randn(rank, na)
-            E_true = 0.1 * np.random.randn(d, na)
-            A = B @ X_true + E_true
+            A = np.random.randn(d, na)
             lambda_ = 0.1
             opts = self._get_default_opts(loss='l21')
-            return (A, B, lambda_, opts)
+            return (A, A, lambda_, opts)
         
         elif problem_name == 'robust_multi_view_spectral_clustering':
             # min_{L,S_i} ||L||_*+lambda*sum_i ||S_i||_1, s.t. X_i=L+S_i
-            d, n, m = 50, 50, 3
-            X = np.random.randn(d, n, m)
-            lambda_ = 0.1
-            opts = self._get_default_opts()
+            n = 100
+            r = 5
+            m = 10
+            X = np.random.randn(n, n, m)
+            lambda_ = 1 / np.sqrt(n)
+            opts = self._get_default_opts(loss='l1')
             return (X, lambda_, opts)
         
         elif problem_name == 'tracelasso':
             # min_x ||A*Diag(x)||_*, s.t. Ax=b
-            d, n = 50, 100
-            A = np.random.randn(d, n)
-            x_true = np.zeros(n)
-            x_true[:10] = np.random.randn(10)
-            b = A @ x_true
+            d, na, nb = 10, 200, 100
+            A = np.random.randn(d, na)
+            X = np.random.randn(na, nb)
+            B = A @ X
+            b = B[:, 0]
             opts = self._get_default_opts()
             return (A, b, opts)
         
@@ -316,10 +309,8 @@ class StrategyEvaluator:
             # 动态导入算法模块
             algo_module = importlib.import_module(f'libadmm.algorithms.{module_name}')
             
-            # 使用策略运行算法（带策略的自定义执行）
             start_time = datetime.now()
             
-            # 调用带策略的算法执行
             result = self._run_algorithm_with_strategy(
                 algo_module, func_name, test_data, strategy_func
             )
@@ -404,7 +395,7 @@ class StrategyEvaluator:
         
         Args:
             strategy_path: 策略文件路径
-            algorithm_type: 算法类型（目前仅支持 'admm'）
+            algorithm_type: 算法类型
             problem_names: 要评估的问题列表，如果为 None 则使用默认的 8 个问题
             
         Returns:
@@ -418,8 +409,7 @@ class StrategyEvaluator:
         if problem_names is None:
             problem_names = self.admm_problems
         
-        logger.info(f"开始评估策略：{strategy_path}")
-        logger.info(f"评估问题列表：{problem_names}")
+        logger.info(f"开始评估策略")
         
         # 加载策略
         try:
@@ -530,8 +520,6 @@ class StrategyEvaluator:
         # 分析未收敛问题的共同特征
         if len(unconverged_problems) > total_problems / 2:
             feedback_parts.append("⚠️ 超过半数问题未收敛，建议采用更保守的策略")
-            feedback_parts.append("  - 考虑减小 beta 的调整幅度")
-            feedback_parts.append("  - 增加 beta 的上下限范围")
         
         # 针对特定问题类型的建议
         regression_problems = [p for p in unconverged_problems 

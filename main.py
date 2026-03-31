@@ -17,6 +17,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Dict, Any
+# 导入自定义模块
 from strategy_generator import StrategyGenerator
 from evaluator import StrategyEvaluator
 from feedback_loop import FeedbackLoop
@@ -30,7 +31,7 @@ class EvolutionaryTuningMain:
     实现 ADMM 惩罚参数调整策略的自动优化。
     
     工作流程：
-    1. 生成策略代码 → 2. 在 8 个 ADMM 问题上评估 → 3. 生成反馈 → 4. 指导下一次生成
+    生成策略代码 → 在 8 个 ADMM 问题上评估 →生成反馈 → 指导下一次生成
     """
     
     def __init__(self, config_path: str = "config.yaml"):
@@ -53,7 +54,7 @@ class EvolutionaryTuningMain:
             best_strategy (dict): 最佳策略信息（路径、性能、结果）
             best_performance (float): 最佳性能值（平均迭代次数，越小越好）
             history (list): 历史迭代记录列表
-            consecutive_no_improvement (int): 连续无改进轮次，用于触发千问分析
+            consecutive_no_improvement (int): 连续无有效改进的轮次，用于触发千问分析
         """
         # 加载配置
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -74,14 +75,14 @@ class EvolutionaryTuningMain:
             self.advisor = None
         self.last_advisor_guidance = None  # 保存最近一次的指导建议
 
-        # 状态跟踪
+        # 状态初始化
         self.iteration = 0
         self.best_strategy = None
         self.best_performance = float('inf')
         self.history = []
-        self.no_improve_rounds = 0  # 连续无性能改进的轮数，用于早停
+        self.no_improve_rounds = 0 
         
-        # 智能调用千问 API 配置
+        # 千问 API 配置
         self.consecutive_no_improvement = 0  # 连续无有效改进的轮次
         self.last_significant_improvement_iter = 0  # 上次显著改进的轮次
         self.advisor_call_history = []  # 千问 API 调用历史记录
@@ -117,7 +118,7 @@ class EvolutionaryTuningMain:
 
     def run(self):
         """运行主循环"""
-        self.logger.info("启动进化自适应调参框架（strict模式）")
+        self.logger.info("启动进化自适应调参框架")
 
         # 检查API配置
         api_key = self.config['api']['api_key']
@@ -276,7 +277,7 @@ class EvolutionaryTuningMain:
         if self.iteration == 1:
             # 第一轮，提供初始提示
             initial_prompt = self.feedback_loop.get_initial_prompt("admm")
-            strict_requirements = "\n\n【strict模式要求】\n1. 继承BaseTuningStrategy类\n2. update_parameters签名: update_parameters(self, iteration_state: Dict[str, Any]) -> Dict[str, Any]\n3. 只调整beta参数，返回{'beta': new_beta_value}\n"
+            strict_requirements = "\n\n【strict模式要求】\n1. 函数签名：def adjust_beta(iteration_state: Dict[str, Any]) -> float:\n2. 必须直接返回 float 类型的 new_beta 值（不是字典）\n3. 只调整beta参数，不要调整其他ADMM参数\n4. 必须处理除零和None值情况\n5. 必须限制beta的范围，避免数值不稳定\n"
             return initial_prompt + strict_requirements
         else:
             # 第二轮及以后，获取上一轮的结果来指导本轮的生成
@@ -338,7 +339,7 @@ class EvolutionaryTuningMain:
             if self.last_advisor_guidance:
                 advisor_section = (
                     "\n\n【千问专家指导建议】\n" +
-                    "以下是ADMM优化专家(Qwen3-235B-A22B)给出的深度分析和优化建议，请优先参考：\n\n" +
+                    "以下是ADMM优化专家给出的深度分析和优化建议，请优先参考：\n\n" +
                     f"{self.last_advisor_guidance}\n\n" +
                     "【请优先按照上述专家建议调整策略参数】\n"
                 )
