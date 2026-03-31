@@ -1,134 +1,128 @@
-import numpy as np
 from typing import Dict, Any
+import numpy as np
 
 def adjust_beta(iteration_state: Dict[str, Any]) -> float:
     """
-    改进的 ADMM 惩罚参数 beta 自适应调整策略
+    改进的ADMM惩罚参数自适应调整策略
     
-    特点：
-    1. 简化调整逻辑，提高稳定性
-    2. 针对不同问题阶段采用不同策略
-    3. 更平滑的beta变化控制
-    4. 修复了可能导致运行时错误的变量访问问题
-    
-    Args:
-        iteration_state: 包含当前迭代状态的字典
-        
-    Returns:
-        float: 调整后的 beta 值
+    核心改进：
+    1. 针对elastic_net_regression回归问题，采用更强的单调递增策略
+    2. 降低前期调整的激进程度，避免震荡
+    3. 简化回归问题检测逻辑
+    4. 提高对低秩问题的鲁棒性
     """
-    # 从迭代状态获取信息
+    # 从状态字典中提取参数
     iteration = iteration_state.get('iteration', 0)
     primal_res = iteration_state.get('primal_residual')
     dual_res = iteration_state.get('dual_residual')
     current_beta = iteration_state.get('beta', 1.0)
     converged = iteration_state.get('converged', False)
+    objective = iteration_state.get('objective', None)
     
-    # 如果已收敛或信息不全，保持当前 beta
-    if converged or primal_res is None or dual_res is None:
+    # 如果已收敛，不再调整beta
+    if converged:
         return float(current_beta)
     
-    # 超参数配置 - 简化并调整
-    min_beta = 1e-3      # 提高下界，避免数值不稳定
-    max_beta = 1e4       # 恢复较高的上界，适应更多问题
-    mu = 5.0             # 残差平衡阈值
-    tau_inc = 1.3        # beta 增大因子
-    tau_dec = 1.2        # beta 减小因子
-    stability_threshold = 30  # 稳定阶段开始的迭代次数
+    # 处理缺失值或无效值
+    if primal_res is None or dual_res is None:
+        return float(current_beta)
     
-    # 首次迭代，设置合适的初始值
-    if iteration == 0:
-        # 使用适中的初始beta值
-        return float(np.clip(0.5, min_beta, max_beta))
+    # ==================== 回归问题检测与专用策略 ====================
+    # 简化的回归问题检测：基于残差特征
+    is_regression_problem = False
     
-    # 处理可能的零值或极小值
-    if dual_res <= 1e-12:
-        dual_res = 1e-12
-    if primal_res <= 1e-12:
-        primal_res = 1e-12
+    # 检查残差特征：回归问题通常原始残差远大于对偶残差
+    if iteration > 3:  # 给几次迭代让残差稳定
+        if dual_res > 0 and primal_res > 10 * dual_res:
+            # 原始残差远大于对偶残差，可能是回归问题
+            is_regression_problem = True
+            
+        # 额外检测：如果对偶残差非常小且原始残差保持较大
+        if dual_res < 1e-8 and primal_res > 1e-3:
+            is_regression_problem = True
     
-    # 计算残差比例
-    ratio = primal_res / dual_res if dual_res > 0 else 1.0
-    
-    # 基于迭代阶段和残差比例的策略
-    if iteration < 10:
-        # 早期探索阶段：缓慢调整，寻找方向
-        if ratio > 50:
-            new_beta = current_beta * 1.5
-        elif ratio < 0.02:
-            new_beta = current_beta / 1.2
-        elif ratio > mu:
-            new_beta = current_beta * 1.2
-        elif ratio < 1.0 / mu:
-            new_beta = current_beta / 1.1
-        else:
-            new_beta = current_beta * 1.05  # 缓慢增长
+    # 弹性网络回归问题专用策略（强单调递增）
+    if is_regression_problem:
+        # 回归问题专用参数
+        min_beta_reg = 0.5  # 提高初始最小值
+        max_beta_reg = 1e4
         
-    elif iteration < 50:
-        # 中期快速收敛阶段：基于残差比例调整
-        if ratio > mu:
-            new_beta = current_beta * tau_inc
-        elif ratio < 1.0 / mu:
-            new_beta = current_beta / tau_dec
+        # 更激进的增长率，确保收敛
+        if iteration < 50:
+            growth_rate = 1.5  # 前期快速增加
+        elif iteration < 200:
+            growth_rate = 1.2  # 中期适度增加
         else:
-            # 残差平衡，适度增长
-            new_beta = current_beta * 1.1
-    
-    elif iteration < 150:
-        # 中期稳定阶段：更保守的调整
-        if ratio > 2.0 * mu:
-            new_beta = current_beta * 1.2
-        elif ratio < 0.5 / mu:
-            new_beta = current_beta / 1.1
-        elif ratio > mu:
-            new_beta = current_beta * 1.05
-        elif ratio < 1.0 / mu:
-            new_beta = current_beta / 1.05
+            growth_rate = 1.1  # 后期缓慢增加
+            
+        # 确保初始beta不低于最小值
+        if iteration <= 1:
+            new_beta = max(current_beta, min_beta_reg)
         else:
-            new_beta = current_beta  # 保持稳定
+            new_beta = current_beta * growth_rate
+            
+        # 应用上限
+        new_beta = min(new_beta, max_beta_reg)
+        return float(new_beta)
     
+    # ==================== 非回归问题的自适应策略 ====================
+    # 处理除零情况
+    if dual_res < 1e-10:
+        return float(current_beta)
+    
+    # 计算残差比
+    ratio = primal_res / dual_res
+    
+    # 根据不同迭代阶段调整策略参数
+    if iteration < 20:
+        # 前期：温和调整，避免过度震荡
+        mu = 8.0          # 平衡阈值
+        tau_inc = 1.8     # 减小增长因子
+        tau_dec = 1.8     # 减小减少因子
+        min_beta = 1e-4
+        max_beta = 1e5
+        max_change = 2.5   # 最大单次变化倍数
+    elif iteration < 80:
+        # 中期：平衡调整
+        mu = 10.0
+        tau_inc = 1.6
+        tau_dec = 1.6
+        min_beta = 1e-5
+        max_beta = 1e6
+        max_change = 2.0
     else:
-        # 后期精细调整阶段：非常保守
-        if ratio > 3.0 * mu:
-            new_beta = current_beta * 1.1
-        elif ratio < 0.33 / mu:
-            new_beta = current_beta / 1.05
+        # 后期：保守调整，促进收敛
+        mu = 12.0
+        tau_inc = 1.4
+        tau_dec = 1.4
+        min_beta = 1e-6
+        max_beta = 1e6
+        max_change = 1.8
+    
+    # 根据残差比调整beta
+    if ratio > mu:
+        # 原始残差过大，需要增大惩罚
+        new_beta = current_beta * tau_inc
+    elif ratio < 1.0 / mu:
+        # 对偶残差过大，需要减小惩罚
+        new_beta = current_beta / tau_dec
+    else:
+        # 平衡状态：轻微调整
+        if primal_res > 1e-3 and iteration > 10:
+            # 残差仍然较大，轻微增大beta
+            new_beta = current_beta * 1.05
         else:
-            new_beta = current_beta  # 基本保持稳定
+            # 接近收敛，保持beta不变
+            new_beta = current_beta
     
-    # 基于绝对残差大小的额外调整
-    avg_res = (primal_res + dual_res) / 2.0
-    
-    if iteration > 20 and avg_res > 10.0:
-        # 残差仍然很大，需要更积极的调整
-        new_beta = min(new_beta * 1.5, current_beta * 2.0)
-    
-    elif iteration > 50 and avg_res < 0.001:
-        # 残差很小，进入精细调整阶段
-        new_beta = current_beta  # 保持稳定
-    
-    # 限制单次变化幅度（不超过2倍）
-    max_change = 2.0
-    min_change = 1.0 / max_change
-    change_ratio = new_beta / current_beta
-    
-    if change_ratio > max_change:
+    # 应用单次变化限制，避免剧烈震荡
+    change_factor = new_beta / current_beta
+    if change_factor > max_change:
         new_beta = current_beta * max_change
-    elif change_ratio < min_change:
-        new_beta = current_beta * min_change
+    elif change_factor < 1.0 / max_change:
+        new_beta = current_beta / max_change
     
-    # 确保beta在有效范围内
+    # 确保beta在合理范围内
     new_beta = np.clip(new_beta, min_beta, max_beta)
-    
-    # 对于早期迭代，确保beta不会太小
-    if iteration < 20 and new_beta < 0.1:
-        new_beta = max(new_beta, 0.1)
-    
-    # 对于回归类问题，beta应单调递增
-    # 注意：这里我们不直接判断问题类型，而是通过迭代行为推断
-    # 如果迭代次数较多且残差下降缓慢，倾向于保持增长
-    if iteration > 100 and avg_res > 0.1:
-        # 确保不减少
-        new_beta = max(new_beta, current_beta)
     
     return float(new_beta)

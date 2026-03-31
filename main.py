@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""主控制循环模块 - 使用strict模式版本管理整个生成-验证-反馈迭代流程"""
+"""
+ADMM 进化自适应调参框架 - 主控制循环模块
+
+功能说明：
+1. 整合策略生成器、评估器和反馈循环，形成完整的迭代优化流程
+2. 支持智能调用千问指导者进行深度分析
+3. 实现早停机制和性能追踪
+4. 管理策略生成历史，避免重复尝试
+
+使用流程：
+    main = EvolutionaryTuningMain("config.yaml")
+    main.run()
+"""
 import yaml
 import logging
 import os
@@ -11,11 +23,37 @@ from feedback_loop import FeedbackLoop
 from advisor import ADMMAdvisor
 
 class EvolutionaryTuningMain:
+    """
+    进化调参主控制器
+    
+    整合 StrategyGenerator、StrategyEvaluator 和 FeedbackLoop，
+    实现 ADMM 惩罚参数调整策略的自动优化。
+    
+    工作流程：
+    1. 生成策略代码 → 2. 在 8 个 ADMM 问题上评估 → 3. 生成反馈 → 4. 指导下一次生成
+    """
+    
     def __init__(self, config_path: str = "config.yaml"):
         """
         初始化主控制器
+        
+        加载配置文件，初始化各个组件（生成器、评估器、反馈循环、指导者），
+        设置状态跟踪变量和智能调用配置。
+        
         Args:
-            config_path: 配置文件路径
+            config_path (str): 配置文件路径，默认为 "config.yaml"
+            
+        Attributes:
+            config (dict): 从 YAML 文件加载的配置字典
+            generator (StrategyGenerator): 策略生成器实例
+            evaluator (StrategyEvaluator): 策略评估器实例
+            feedback_loop (FeedbackLoop): 反馈循环实例
+            advisor (ADMMAdvisor): 千问指导者实例（可选）
+            iteration (int): 当前迭代轮次
+            best_strategy (dict): 最佳策略信息（路径、性能、结果）
+            best_performance (float): 最佳性能值（平均迭代次数，越小越好）
+            history (list): 历史迭代记录列表
+            consecutive_no_improvement (int): 连续无改进轮次，用于触发千问分析
         """
         # 加载配置
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -43,10 +81,10 @@ class EvolutionaryTuningMain:
         self.history = []
         self.no_improve_rounds = 0  # 连续无性能改进的轮数，用于早停
         
-        # 智能调用千问API配置
+        # 智能调用千问 API 配置
         self.consecutive_no_improvement = 0  # 连续无有效改进的轮次
         self.last_significant_improvement_iter = 0  # 上次显著改进的轮次
-        self.advisor_call_history = []  # 千问API调用历史记录
+        self.advisor_call_history = []  # 千问 API 调用历史记录
         
         # 加载智能调用配置
         self.smart_call_config = {
@@ -686,6 +724,26 @@ class EvolutionaryTuningMain:
     
     def _record_advisor_call(self, iteration: int, reason: str, 
                             duration: float, guidance_summary: str):
+        """
+        记录千问 API 调用历史，用于后续分析和避免频繁调用
+        
+        保存每次千问指导者的调用信息，包括调用原因、耗时、指导建议等。
+        如果启用了调用历史保存功能，会自动写入 JSON 文件。
+        
+        Args:
+            iteration (int): 当前迭代轮次
+            reason (str): 调用原因说明，如"连续无改进达到阈值"
+            duration (float): 调用耗时，单位为秒
+            guidance_summary (str): 指导建议的摘要内容（前 200 字符）
+        
+        Side Effects:
+            - 更新 self.advisor_call_history 列表
+            - 如果启用保存，会写入 advisor_call_history.json 文件
+        
+        Note:
+            - 调用历史帮助分析千问 API 的使用效果
+            - 摘要用于快速回顾之前的建议
+        """
         """
         记录千问 API 调用历史，用于后续分析和避免频繁调用
         

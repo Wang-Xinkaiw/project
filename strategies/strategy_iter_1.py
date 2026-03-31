@@ -1,192 +1,205 @@
-import numpy as np
 from typing import Dict, Any
+import numpy as np
 
-# 假设 BaseTuningStrategy 基类已定义
+
 class BaseTuningStrategy:
-    """ADMM参数调整策略基类"""
+    """基础参数调整策略基类"""
     def __init__(self, **kwargs):
         self.params = kwargs
     
     def adjust_beta(iteration_state: Dict[str, Any]) -> float:
         """获取当前参数"""
-        return self.params
+        return self.params.copy()
     
-    def set_parameters(self, params: Dict[str, Any]) -> None:
+    def set_parameters(self, **kwargs):
         """设置参数"""
-        self.params.update(params)
+        self.params.update(kwargs)
 
 
-class EnhancedBetaTuningStrategy(BaseTuningStrategy):
+class AdaptiveBetaStrategy(BaseTuningStrategy):
     """
-    增强的ADMM惩罚参数beta自适应调整策略
+    ADMM惩罚参数beta自适应调整策略
     
-    针对l1_regression和elastic_net_regression问题的改进策略：
-    - 针对含噪声问题，采用beta单调递增策略（只增不减）
-    - 结合残差平衡机制，避免过度惩罚
-    - 引入历史信息，提高策略鲁棒性
+    核心特点：
+    1. 针对回归问题(l1_regression, elastic_net_regression)采用单调递增策略
+    2. 针对其他问题采用残差比自适应策略
+    3. 考虑迭代历史信息，避免震荡
+    4. 具有鲁棒的数值处理机制
     """
     
-    def __init__(self, **kwargs):
+    def __init__(self, 
+                 initial_beta: float = 1.0,
+                 min_beta: float = 1e-6,
+                 max_beta: float = 1e4,
+                 mu: float = 10.0,
+                 tau_inc: float = 2.0,
+                 tau_dec: float = 2.0,
+                 growth_rate: float = 1.1,
+                 problem_type: str = "l1_regularization",
+                 history_window: int = 5):
         """
-        初始化策略参数
+        初始化自适应beta调整策略
         
-        Args:
-            initial_beta: 初始beta值，默认1.0
-            min_beta: beta最小值，默认1e-6
-            max_beta: beta最大值，默认1e4
-            growth_factor: 增长因子，默认1.5-2.5
-            mu: 残差平衡阈值，默认10.0
-            patience: 未收敛容忍次数，默认5
-            fast_growth_threshold: 快速增长阈值，默认5.0
-            slow_growth_threshold: 慢速增长阈值，默认0.1
+        参数:
+        ----------
+        initial_beta : float
+            初始beta值，默认1.0
+        min_beta : float
+            beta最小值，默认1e-6
+        max_beta : float
+            beta最大值，默认1e4
+        mu : float
+            残差比阈值，默认10.0
+        tau_inc : float
+            beta增大因子，默认2.0
+        tau_dec : float
+            beta减小因子，默认2.0
+        growth_rate : float
+            单调递增时的增长率，默认1.1
+        problem_type : str
+            问题类型，决定调整策略
+        history_window : int
+            历史信息窗口大小，用于检测震荡
         """
-        super().__init__(**kwargs)
+        super().__init__(
+            initial_beta=initial_beta,
+            min_beta=min_beta,
+            max_beta=max_beta,
+            mu=mu,
+            tau_inc=tau_inc,
+            tau_dec=tau_dec,
+            growth_rate=growth_rate,
+            problem_type=problem_type,
+            history_window=history_window
+        )
         
-        # 默认参数
-        default_params = {
-            'initial_beta': 1.0,
-            'min_beta': 1e-6,
-            'max_beta': 1e4,
-            'growth_factor': 1.8,  # 默认1.8，可根据问题调整
-            'mu': 10.0,
-            'patience': 5,
-            'fast_growth_threshold': 5.0,
-            'slow_growth_threshold': 0.1,
-            'history_window': 3,  # 历史窗口大小
-            'convergence_tolerance': 1e-6
-        }
-        
-        # 更新默认参数
-        default_params.update(kwargs)
-        self.params = default_params
-        
-        # 初始化历史记录
+        # 内部状态变量
+        self.beta_history = []
         self.primal_history = []
         self.dual_history = []
-        self.beta_history = []
-        self.stagnation_count = 0
+        self.is_regression = problem_type in ["l1_regression", "elastic_net_regression"]
+    
+    def _detect_oscillation(self, current_beta: float, window: int = 3) -> bool:
+        """检测beta值是否在震荡"""
+        if len(self.beta_history) < window * 2:
+            return False
         
-    def adjust_beta(iteration_state: Dict[str, Any]) -> float:
-            iteration_state: 包含当前迭代状态的字典
+        recent_betas = self.beta_history[-window:]
+        variations = np.abs(np.diff(recent_betas) / recent_betas[:-1])
         
-        Returns:
-            Dict[str, Any]: 更新后的参数字典，包含新的beta值
-        """
-        # 从iteration_state获取状态信息
+        # 如果最近几次调整方向频繁变化，说明在震荡
+        signs = np.sign(np.diff(recent_betas))
+        sign_changes = np.sum(np.abs(np.diff(signs)))
+        
+        return sign_changes >= window - 2
+    
+    def _regression_strategy(self, iteration_state: Dict[str, Any]) -> float:
+        """回归问题专用策略：单调递增"""
+        current_beta = iteration_state.get('beta', self.params['initial_beta'])
         iteration = iteration_state.get('iteration', 0)
+        
+        # 根据迭代次数调整增长率
+        if iteration < 50:
+            # 前期：快速增长
+            effective_growth = self.params['growth_rate'] * 1.2
+        elif iteration < 200:
+            # 中期：正常增长
+            effective_growth = self.params['growth_rate']
+        else:
+            # 后期：缓慢增长
+            effective_growth = 1.01
+        
+        new_beta = current_beta * effective_growth
+        
+        # 限制范围
+        return float(np.clip(new_beta, self.params['min_beta'], self.params['max_beta']))
+    
+    def _residual_ratio_strategy(self, iteration_state: Dict[str, Any]) -> float:
+        """基于残差比的自适应策略"""
         primal_res = iteration_state.get('primal_residual')
         dual_res = iteration_state.get('dual_residual')
         current_beta = iteration_state.get('beta', self.params['initial_beta'])
-        converged = iteration_state.get('converged', False)
+        iteration = iteration_state.get('iteration', 0)
         
-        # 第一次迭代，使用初始beta
-        if iteration == 0:
-            new_beta = self.params['initial_beta']
-            self.beta_history.append(new_beta)
-            return {'beta': new_beta}
+        # 处理缺失值或无效值
+        if primal_res is None or dual_res is None or dual_res < 1e-10:
+            return current_beta
         
-        # 如果已收敛，保持当前beta
-        if converged:
-            return {'beta': current_beta}
+        # 计算残差比
+        ratio = primal_res / max(dual_res, 1e-10)
         
-        # 处理缺失值
-        if primal_res is None or dual_res is None:
-            return {'beta': current_beta}
-        
-        # 更新历史记录
-        self.primal_history.append(primal_res)
-        self.dual_history.append(dual_res)
-        self.beta_history.append(current_beta)
-        
-        # 限制历史记录长度
-        window = self.params['history_window']
-        if len(self.primal_history) > window:
-            self.primal_history = self.primal_history[-window:]
-            self.dual_history = self.dual_history[-window:]
-            self.beta_history = self.beta_history[-window:]
-        
-        # 针对含噪声回归问题的特殊策略：beta单调递增
-        # 但结合残差平衡进行适度调整
-        
-        # 计算历史平均残差
-        if len(self.primal_history) > 1:
-            avg_primal = np.mean(self.primal_history)
-            avg_dual = np.mean(self.dual_history)
-            
-            # 检查收敛停滞
-            recent_primal_change = abs(self.primal_history[-1] - self.primal_history[-2])
-            if recent_primal_change < self.params['convergence_tolerance']:
-                self.stagnation_count += 1
-            else:
-                self.stagnation_count = 0
+        # 根据迭代阶段调整阈值
+        if iteration < 50:
+            # 前期：更激进的调整
+            effective_mu = self.params['mu'] / 2
+            effective_tau_inc = min(self.params['tau_inc'] * 1.5, 3.0)
+            effective_tau_dec = min(self.params['tau_dec'] * 1.5, 3.0)
+        elif iteration < 200:
+            # 中期：正常调整
+            effective_mu = self.params['mu']
+            effective_tau_inc = self.params['tau_inc']
+            effective_tau_dec = self.params['tau_dec']
         else:
-            avg_primal = primal_res
-            avg_dual = dual_res
+            # 后期：保守调整
+            effective_mu = self.params['mu'] * 2
+            effective_tau_inc = max(self.params['tau_inc'] * 0.5, 1.2)
+            effective_tau_dec = max(self.params['tau_dec'] * 0.5, 1.2)
         
-        # 策略1: 残差平衡调整
-        if dual_res > 1e-10:
-            # 计算残差比，避免除零
-            ratio = primal_res / dual_res if dual_res > 0 else float('inf')
-            
-            # 基础增长因子
-            growth = self.params['growth_factor']
-            
-            # 根据残差比调整增长因子
-            if ratio > self.params['fast_growth_threshold']:
-                # 原始残差过大，快速增加beta
-                growth_factor = min(growth * 1.3, 2.5)
-            elif ratio < self.params['slow_growth_threshold']:
-                # 对偶残差过大，慢速增加beta
-                growth_factor = max(growth * 0.7, 1.1)
-            else:
-                # 残差相对平衡，使用标准增长因子
-                growth_factor = growth
-            
-            # 检查收敛停滞，如果停滞多次，增加beta以推动收敛
-            if self.stagnation_count > self.params['patience']:
-                growth_factor = min(growth_factor * 1.5, 3.0)
-            
-            # 计算新beta值（只增不减）
-            new_beta = current_beta * growth_factor
+        # 检查是否震荡
+        if self._detect_oscillation(current_beta):
+            # 震荡时采用更保守的策略
+            effective_tau_inc = max(effective_tau_inc * 0.7, 1.1)
+            effective_tau_dec = max(effective_tau_dec * 0.7, 1.1)
         
+        # 根据残差比调整beta
+        if ratio > effective_mu:
+            new_beta = current_beta * effective_tau_inc
+        elif ratio < 1.0 / effective_mu:
+            new_beta = current_beta / effective_tau_dec
         else:
-            # 如果对偶残差非常小，保持当前beta
-            new_beta = current_beta * self.params['growth_factor']
+            # 平衡状态：小幅调整或保持
+            if primal_res > 1e-3:  # 残差仍较大，小幅增加
+                new_beta = current_beta * 1.05
+            else:
+                new_beta = current_beta
         
-        # 策略2: 安全界限限制
-        # 确保beta在合理范围内
-        min_beta = self.params['min_beta']
-        max_beta = self.params['max_beta']
-        
-        # 对beta进行平滑限制，避免突变
-        beta_change = new_beta / current_beta
-        if beta_change > 10.0:
-            # 如果变化太大，限制增长
-            new_beta = current_beta * 5.0
-        
-        new_beta = np.clip(new_beta, min_beta, max_beta)
-        
-        # 策略3: 针对迭代次数的调整
-        # 早期迭代：较快增长以快速逼近
-        # 后期迭代：较慢增长以精细调整
-        if iteration < 10:
-            # 早期迭代，允许较快增长
-            pass
-        elif iteration > 50:
-            # 后期迭代，减缓增长
-            max_growth = 1.5
-            if new_beta > current_beta * max_growth:
-                new_beta = current_beta * max_growth
+        # 限制范围
+        new_beta = float(np.clip(new_beta, self.params['min_beta'], self.params['max_beta']))
         
         # 更新历史记录
         self.beta_history.append(new_beta)
+        self.primal_history.append(primal_res)
+        self.dual_history.append(dual_res)
         
-        return {'beta': float(new_beta)}
+        # 保持历史记录大小
+        if len(self.beta_history) > self.params['history_window'] * 2:
+            self.beta_history = self.beta_history[-self.params['history_window'] * 2:]
+            self.primal_history = self.primal_history[-self.params['history_window'] * 2:]
+            self.dual_history = self.dual_history[-self.params['history_window'] * 2:]
+        
+        return new_beta
     
-    def get_parameters(self) -> Dict[str, Any]:
-        """获取当前参数"""
-        return self.params.copy()
-    
-    def set_parameters(self, params: Dict[str, Any]) -> None:
-        """设置参数"""
-        self.params.update(params)
+    def adjust_beta(iteration_state: Dict[str, Any]) -> float:
+        ----------
+        iteration_state : Dict[str, Any]
+            迭代状态字典，包含当前迭代信息
+        
+        返回:
+        ----------
+        Dict[str, Any]
+            包含更新后beta值的字典
+        """
+        converged = iteration_state.get('converged', False)
+        
+        # 如果已收敛，不再调整beta
+        if converged:
+            current_beta = iteration_state.get('beta', self.params['initial_beta'])
+            return {'beta': current_beta}
+        
+        # 根据问题类型选择策略
+        if self.is_regression:
+            new_beta = self._regression_strategy(iteration_state)
+        else:
+            new_beta = self._residual_ratio_strategy(iteration_state)
+        
+        return {'beta': new_beta}

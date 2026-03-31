@@ -1,4 +1,12 @@
 # strategy_generator.py
+"""
+ADMM 惩罚参数策略生成器模块
+
+功能：
+1. 调用 DeepSeek API 生成 adjust_beta 函数
+2. 验证和修正生成的代码
+3. 提供详细的生成要求和示例
+"""
 import openai
 import logging
 import re
@@ -7,11 +15,35 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 class StrategyGenerator:
+    """
+    策略生成器 - 使用 DeepSeek API 生成 ADMM 惩罚参数调整策略
+    
+    工作流程：
+    1. 构建系统提示词（包含技术要求和示例）
+    2. 接收 evaluator 的反馈
+    3. 调用 DeepSeek API 生成改进的策略代码
+    4. 验证并修正生成的代码
+    """
+    
     def __init__(self, config: Dict[str, Any]):
         """
         初始化策略生成器
+        
+        从配置文件加载 API 设置，创建 OpenAI 客户端，
+        构建系统提示词用于指导代码生成。
+        
         Args:
-            config: 从 config.yaml 加载的配置
+            config (dict): 配置字典，必须包含 'api' 节
+                - api.api_key: DeepSeek API 密钥
+                - api.base_url: API 基础 URL（可选，默认 DeepSeek 官方）
+                - api.model: 模型名称（可选，默认 'deepseek-coder'）
+                - api.temperature: 生成温度（可选，默认 0.7）
+                
+        Attributes:
+            client: OpenAI 客户端实例
+            model (str): 使用的模型名称
+            temperature (float): 生成温度（0-2，越高越随机）
+            system_prompt (str): 系统提示词
         """
         api_config = config['api']
         self.client = openai.OpenAI(
@@ -24,7 +56,18 @@ class StrategyGenerator:
 
     def _build_system_prompt(self):
         """
-        构建系统提示，专业指导 DeepSeek 生成 ADMM 惩罚参数调整策略函数
+        构建系统提示词，专业指导 DeepSeek 生成 ADMM 惩罚参数调整策略函数
+        
+        详细说明：
+        1. 核心任务：生成 adjust_beta(iteration_state) -> float 函数
+        2. 强制技术要求：函数签名、参数获取、返回值格式
+        3. iteration_state 字典的键说明
+        4. 8 个测试问题的特性说明
+        5. 正确示例和错误示例
+        6. 输出格式要求
+        
+        Returns:
+            str: 完整的系统提示词
         """
         return """你是一名 ADMM 算法优化专家，专门编写惩罚参数β(beta) 的自适应调整策略函数。
 
@@ -39,80 +82,156 @@ class StrategyGenerator:
 
 【iteration_state 字典的键】
 - iteration: int，当前迭代次数
-- primal_residual: float，原始残差范数（约束违反程度）
-- dual_residual: float，对偶残差范数（最优性条件违反程度）
-- beta: float，当前惩罚参数值
+- primal_residual: float，原始残差范数（约束违反程度，||Ax-B||）
+- dual_residual: float，对偶残差范数（最优性条件违反程度，||x-z||）
+- beta: float，当前惩罚参数值（也称为 mu 或 ρ）
 - objective: float，目标函数值
 - converged: bool，是否已收敛
 
-【问题特性说明】
-1. l1_regularization, elastic_net：标准稀疏优化问题
-2. l1_regression, elastic_net_regression：含噪声项 E 的回归问题
-   - 建议采用β单调递增策略（只增不减）
-   - 初始β=0.1~1.0，增长率 1.1~1.5，上限 1e4
-3. low_rank_matrix_completion, low_rank_representation：低秩矩阵问题
-   - β影响核范数惩罚强度，需平滑调整
-4. robust_multi_view_spectral_clustering：多视图聚类
-   - β需协调多个视图的平衡
-5. tracelasso：Trace Lasso 问题
-   - β需考虑设计矩阵的相关性
+【关键收敛原理 - 必须理解】
+ADMM 算法的收敛性依赖于原始残差和对偶残差的平衡：
+1. 当 primal_residual >> dual_residual 时：说明约束满足度差，需要增大 beta 加强惩罚
+2. 当 dual_residual >> primal_residual 时：说明对偶变量变化慢，需要减小 beta 缓解过度惩罚
+3. 理想状态：两个残差以相似速率下降，保持平衡
 
-【正确示例 - 标准 ADMM 策略函数】
+【问题特性与推荐策略】
+1. l1_regularization, elastic_net：标准稀疏优化问题
+   - 推荐使用残差比策略或单调递增策略
+   - beta 范围：[1e-6, 1e6]
+
+2. l1_regression, elastic_net_regression：含噪声项的回归问题（最难收敛）
+   - 必须采用 beta 单调递增策略（只增不减）
+   - 初始 beta=0.1~1.0，增长率 1.05~1.2，上限 1e4
+   - 原因：回归问题需要逐步加强惩罚以逼近期望解
+
+3. low_rank_matrix_completion, low_rank_representation：低秩矩阵问题
+   - beta 影响核范数惩罚强度，需平滑调整
+   - 避免大幅度跳变，建议使用温和的调整因子（1.5-2.0）
+
+4. robust_multi_view_spectral_clustering：多视图聚类
+   - beta 需协调多个视图的平衡
+   - 建议使用残差比策略
+
+5. tracelasso：Trace Lasso 问题
+   - beta 需考虑设计矩阵的相关性
+   - 建议使用保守的调整策略
+
+【推荐策略模板 1 - 残差比策略（通用型）】
 ```python
 from typing import Dict, Any
 import numpy as np
 
 def adjust_beta(iteration_state: Dict[str, Any]) -> float:
     \"\"\"
-    ADMM 惩罚参数 beta 自适应调整策略
+    基于残差比的自适应 beta 调整策略
     
-    Args:
-        iteration_state: 包含当前迭代状态的字典
-            - iteration: 当前迭代次数
-            - primal_residual: 原始残差
-            - dual_residual: 对偶残差
-            - beta: 当前 beta 值
-            - objective: 目标函数值
-            - converged: 是否收敛
-    
-    Returns:
-        float: 调整后的 beta 值
+    核心思想：根据原始残差和对偶残差的比例动态调整 beta
+    - 当 primal/dual > 10 时：增大 beta（加强惩罚）
+    - 当 primal/dual < 0.1 时：减小 beta（缓解惩罚）
+    - 当 0.1 <= primal/dual <= 10 时：保持 beta（平衡状态）
     \"\"\"
-    # 从 iteration_state 获取状态信息
+    primal_res = iteration_state.get('primal_residual', 1.0)
+    dual_res = iteration_state.get('dual_residual', 1.0)
+    current_beta = iteration_state.get('beta', 1.0)
+    
+    # 防止除零和无效值
+    if primal_res is None or dual_res is None or dual_res < 1e-10:
+        return current_beta
+    
+    # 计算残差比
+    ratio = primal_res / dual_res
+    
+    # 超参数
+    mu = 10.0           # 平衡阈值
+    tau_inc = 2.0       # 增大因子
+    tau_dec = 2.0       # 减小因子
+    min_beta = 1e-6     # beta 下界
+    max_beta = 1e6      # beta 上界
+    
+    # 根据残差比调整 beta
+    if ratio > mu:
+        new_beta = current_beta * tau_inc
+    elif ratio < 1.0 / mu:
+        new_beta = current_beta / tau_dec
+    else:
+        new_beta = current_beta
+    
+    # 限制范围
+    return float(np.clip(new_beta, min_beta, max_beta))
+```
+
+【推荐策略模板 2 - 单调递增策略（回归问题专用）】
+```python
+from typing import Dict, Any
+import numpy as np
+
+def adjust_beta(iteration_state: Dict[str, Any]) -> float:
+    \"\"\"
+    单调递增的 beta 调整策略（专为回归问题设计）
+    
+    核心思想：beta 只增不减，逐步加强惩罚力度
+    - 初始 beta 较小（0.1-1.0）
+    - 每轮以固定增长率（1.05-1.2）递增
+    - 达到上限后保持不变
+    \"\"\"
+    current_beta = iteration_state.get('beta', 1.0)
+    iteration = iteration_state.get('iteration', 0)
+    
+    # 超参数
+    growth_rate = 1.1      # 增长率（1.05-1.2）
+    max_beta = 1e4         # 上限
+    min_beta = 0.1         # 初始值
+    
+    # 单调递增
+    new_beta = current_beta * growth_rate
+    
+    # 限制范围
+    return float(np.clip(new_beta, min_beta, max_beta))
+```
+
+【推荐策略模板 3 - 迭代感知策略（进阶）】
+```python
+from typing import Dict, Any
+import numpy as np
+
+def adjust_beta(iteration_state: Dict[str, Any]) -> float:
+    \"\"\"
+    考虑迭代次数的自适应策略
+    
+    核心思想：
+    - 前期（iteration<100）：采用激进的调整策略
+    - 后期（iteration>=100）：采用保守的调整策略，避免震荡
+    \"\"\"
     primal_res = iteration_state.get('primal_residual', 1.0)
     dual_res = iteration_state.get('dual_residual', 1.0)
     current_beta = iteration_state.get('beta', 1.0)
     iteration = iteration_state.get('iteration', 0)
     
-    # 处理 None 值
-    if primal_res is None or dual_res is None:
+    if primal_res is None or dual_res is None or dual_res < 1e-10:
         return current_beta
     
-    # 超参数配置
-    min_beta = 1e-6      # beta 下界
-    max_beta = 1e6       # beta 上界
-    mu = 10.0            # 残差平衡阈值
-    tau_inc = 2.0        # beta 增大因子
-    tau_dec = 2.0        # beta 减小因子
+    ratio = primal_res / dual_res
     
-    # 基于残差比的自适应调整
-    if dual_res > 1e-10:
-        ratio = primal_res / dual_res
-        if ratio > mu:
-            # 原始残差大，增大 beta
-            new_beta = current_beta * tau_inc
-        elif ratio < 1.0 / mu:
-            # 对偶残差大，减小 beta
-            new_beta = current_beta / tau_dec
-        else:
-            # 残差平衡，保持 beta
-            new_beta = current_beta
+    # 根据迭代次数调整策略
+    if iteration < 100:
+        # 前期：激进调整
+        mu = 5.0
+        tau_inc = 3.0
+        tau_dec = 3.0
+    else:
+        # 后期：保守调整
+        mu = 10.0
+        tau_inc = 1.5
+        tau_dec = 1.5
+    
+    if ratio > mu:
+        new_beta = current_beta * tau_inc
+    elif ratio < 1.0 / mu:
+        new_beta = current_beta / tau_dec
     else:
         new_beta = current_beta
     
-    # 限制 beta 范围
-    new_beta = np.clip(new_beta, min_beta, max_beta)
-    return float(new_beta)
+    return float(np.clip(new_beta, 1e-6, 1e6))
 ```
 
 【错误示例 - 绝对禁止】
@@ -133,13 +252,29 @@ def adjust_beta(iteration_state):
 # ❌ 错误 5：没有返回值
 def adjust_beta(iteration_state):
     new_beta = 1.0  # 没有 return
+
+# ❌ 错误 6：除零错误
+def adjust_beta(iteration_state):
+    ratio = primal_res / dual_res  # 没有检查 dual_res 是否为 0
+
+# ❌ 错误 7：beta 范围过大导致数值不稳定
+new_beta = current_beta * 100  # 禁止！增长因子过大
 ```
+
+【优化建议 - 提高收敛率】
+1. 避免过大的调整因子（建议 1.5-3.0，不要超过 5.0）
+2. 必须处理除零情况（dual_res < 1e-10）
+3. 必须处理 None 值
+4. beta 范围建议：[1e-6, 1e6]，回归问题 [0.1, 1e4]
+5. 对于回归问题，优先使用单调递增策略
+6. 考虑迭代次数，后期采用更保守的策略
 
 【输出要求】
 1. 只输出完整的 Python 函数代码，不要解释说明
 2. 代码必须用 ```python 和 ``` 包裹
-3. 必须包含所有必要的 import 语句
+3. 必须包含所有必要的 import 语句（typing, numpy）
 4. 必须实现 adjust_beta 函数，签名严格符合要求
+5. 优先使用上述推荐策略模板，或在其基础上改进
 """
 
     def _validate_and_fix_code(self, code: str) -> str:
